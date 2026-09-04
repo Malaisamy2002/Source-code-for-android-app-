@@ -43,7 +43,7 @@ jobs:
 
       - name: Install NDK
         run: |
-          sdkmanager --install "ndk;27.0.12077973"
+          sdkmanager --install "ndk;27.0.12077973" "build-tools;34.0.0"
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
@@ -53,27 +53,79 @@ jobs:
       - name: Install Tauri CLI
         run: npm i -D @tauri-apps/cli
 
-      - name: Decode signing keystore (if configured)
-        if: env.ANDROID_KEYSTORE_BASE64 != ''
+      # Every APK must be signed, even for sideloading. If no keystore secrets
+      # are configured we generate a throwaway one so the output is installable
+      # instead of "unsigned" (which Android rejects as a parse/invalid package).
+      - name: Prepare signing keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release-key.jks"
-          echo "ANDROID_SIGNING_STORE_FILE=$RUNNER_TEMP/release-key.jks" >> "$GITHUB_ENV"
+          set -e
+          KS="$RUNNER_TEMP/release-key.jks"
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$KS"
+            STORE_PASS="$ANDROID_KEYSTORE_PASSWORD"
+            KEY_PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+            ALIAS="${ANDROID_KEY_ALIAS:-release}"
+          else
+            echo "No keystore secrets found - generating a temporary signing key."
+            STORE_PASS="android"
+            KEY_PASS="android"
+            ALIAS="release"
+            keytool -genkeypair -v -keystore "$KS" -alias "$ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASS" -keypass "$KEY_PASS" \
+              -dname "CN=Turf App, OU=Dev, O=Turf App, L=NA, S=NA, C=IN"
+          fi
+          echo "KS_PATH=$KS" >> "$GITHUB_ENV"
+          echo "::add-mask::$STORE_PASS"
+          echo "KS_STORE_PASS=$STORE_PASS" >> "$GITHUB_ENV"
+          echo "::add-mask::$KEY_PASS"
+          echo "KS_KEY_PASS=$KEY_PASS" >> "$GITHUB_ENV"
+          echo "KS_ALIAS=$ALIAS" >> "$GITHUB_ENV"
 
       - name: Init Android project
         run: npm run tauri android init
 
       - name: Build APK
         env:
-          ANDROID_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_SIGNING_STORE_FILE: ${{ env.KS_PATH }}
+          ANDROID_SIGNING_STORE_PASSWORD: ${{ env.KS_STORE_PASS }}
+          ANDROID_SIGNING_KEY_ALIAS: ${{ env.KS_ALIAS }}
+          ANDROID_SIGNING_KEY_PASSWORD: ${{ env.KS_KEY_PASS }}
         run: npm run tauri android build -- --apk
+
+      # Fallback: if Gradle still emitted an unsigned APK, align + sign it here.
+      - name: Align and sign APK
+        run: |
+          set -e
+          OUT_DIR=src-tauri/gen/android/app/build/outputs/apk/universal/release
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          mkdir -p artifacts
+          shopt -s nullglob
+          for apk in "$OUT_DIR"/*.apk; do
+            base=$(basename "$apk" .apk)
+            aligned="artifacts/${base%-unsigned}-signed.apk"
+            "$BT/zipalign" -p -f -P 16 4 "$apk" "$aligned"
+            "$BT/zipalign" -c -v -P 16 4 "$aligned"
+            "$BT/apksigner" sign \
+              --ks "$KS_PATH" \
+              --ks-pass "pass:$KS_STORE_PASS" \
+              --ks-key-alias "$KS_ALIAS" \
+              --key-pass "pass:$KS_KEY_PASS" \
+              --v1-signing-enabled true \
+              --v2-signing-enabled true \
+              "$aligned"
+            "$BT/apksigner" verify --print-certs "$aligned"
+          done
+          ls -la artifacts
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: loadlytics-android-apk
-          path: src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+          name: turf-app-android-apk
+          path: artifacts/*.apk
           if-no-files-found: error
