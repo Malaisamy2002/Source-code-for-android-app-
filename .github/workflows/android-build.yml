@@ -90,6 +90,20 @@ jobs:
       - name: Init Android project
         run: npm run tauri android init
 
+      # `gen/android` is generated fresh above, not committed, so any
+      # manifest edits have to happen here every run. tauri-plugin-fs needs
+      # these two permissions to write into the public Downloads directory
+      # (BaseDirectory.Download) — see src/lib/desktop.ts's saveFile().
+      # Idempotent: grep guards against double-inserting on a re-run.
+      - name: Add external storage permissions to Android manifest
+        run: |
+          set -e
+          MANIFEST=src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          if ! grep -q 'READ_EXTERNAL_STORAGE' "$MANIFEST"; then
+            sed -i 's#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />\n    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />#' "$MANIFEST"
+          fi
+          grep -A2 '<manifest' "$MANIFEST"
+
       - name: Build APK
         env:
           ANDROID_SIGNING_STORE_FILE: ${{ env.KS_PATH }}
