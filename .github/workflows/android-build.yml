@@ -109,7 +109,7 @@ jobs:
           for apk in "$OUT_DIR"/*.apk; do
             base=$(basename "$apk" .apk)
             aligned="artifacts/${base%-unsigned}-signed.apk"
-            "$BT/zipalign" -p -f -P 16 4 "$apk" "$aligned"
+            "$BT/zipalign" -f -P 16 4 "$apk" "$aligned"
             "$BT/zipalign" -c -v -P 16 4 "$aligned"
             "$BT/apksigner" sign \
               --ks "$KS_PATH" \
