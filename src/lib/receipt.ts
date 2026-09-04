@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { BUSINESS_NAME, billGrossTotal, billPaidAmount, formatDMY, money, type Bill } from "./biz";
-import { isDesktop, openExternal } from "./desktop";
+import { isDesktop, isMobileShell, openExternal } from "./desktop";
 import { rupees } from "./money";
 import type { SnackSale, TurfBooking } from "./ops";
 import { paperInfo, paperWidthMm, readPrintSettings, type PrintSettings } from "./print";
@@ -396,25 +396,52 @@ export async function downloadReceipt(
 
 /**
  * Opens the print dialog with the receipt, honouring the copies setting.
- * Unmodified for the desktop build: Tauri's Windows runtime is WebView2
- * (full Chromium/Edge engine), so `contentWindow.print()` on the hidden
- * iframe below opens the same native Windows print dialog it would in any
- * browser — and that dialog lists whatever printer the OS has a driver for,
- * which for most thermal/POS receipt printers on Windows is the normal way
- * they're used (they register as a standard Windows print queue). This is
- * the "no live backend needed" case from windows-app-build-prompt.md §1 —
- * no plugin required. STILL NEEDS VERIFICATION ON REAL HARDWARE — see the
- * "still open" section of the port report; this file was not tested against
- * a physical thermal printer.
+ *
+ * Desktop (Windows/macOS/Linux, WebView2/WebKit): `contentWindow.print()` on
+ * the hidden iframe below opens the same native OS print dialog it would in
+ * any browser, listing whatever printer the OS has a driver for. STILL
+ * NEEDS VERIFICATION ON REAL HARDWARE — see the "still open" section of the
+ * port report; this file was not tested against a physical thermal printer.
+ *
+ * Mobile (Android/iOS): Android's system WebView does not implement
+ * `window.print()` at all — calling it doesn't throw, it just does nothing,
+ * which is why tapping Print looked like a dead button. There's also no
+ * native "open in default app" for local files on mobile (`openPath` from
+ * `tauri-plugin-opener` only handles URLs there). So on mobile we hand the
+ * PDF to the OS share sheet instead (`navigator.share`) — the person picks
+ * a PDF viewer or a print/share target from there, and most Android PDF
+ * viewers (Drive, Adobe, etc.) have their own Print button that does go
+ * through Android's native print framework. If the share sheet itself is
+ * unavailable, we fall back to just saving the file so it's not a dead end.
  */
-export function printReceipt(doc: ReceiptDoc, s: PrintSettings = readPrintSettings()) {
+export async function printReceipt(doc: ReceiptDoc, s: PrintSettings = readPrintSettings()) {
   const url = buildReceiptPdf(doc, s).output("bloburl") as unknown as string;
 
   // "Preview before print": open the PDF in a normal tab so the person can
   // check the layout and pick their printer from the browser's own dialog,
   // instead of jumping straight into a hidden-iframe silent print.
-  if (s.previewBeforePrint) {
+  if (s.previewBeforePrint && !isMobileShell()) {
     window.open(url, "_blank");
+    return;
+  }
+
+  if (isMobileShell()) {
+    const pdf = buildReceiptPdf(doc, s);
+    const blob = pdf.output("blob");
+    const file = new File([blob], `${doc.fileName}.pdf`, { type: "application/pdf" });
+    const nav = navigator as Navigator & {
+      canShare?: (data: ShareData) => boolean;
+      share?: (data: ShareData) => Promise<void>;
+    };
+    if (nav.canShare?.({ files: [file] }) && nav.share) {
+      try {
+        await nav.share({ files: [file], title: `${BUSINESS_NAME} ${doc.docNo}` });
+        return;
+      } catch {
+        // person cancelled the share sheet — fall through to saving instead
+      }
+    }
+    await downloadReceipt(doc, s);
     return;
   }
 
@@ -446,16 +473,19 @@ export async function shareReceipt(
     canShare?: (data: ShareData) => boolean;
     share?: (data: ShareData) => Promise<void>;
   };
-  // Desktop (Tauri/WebView2): the Web Share API is not implemented in
-  // WebView2 at all, so `nav.canShare`/`nav.share` are undefined and the
-  // branch below would never run anyway. More importantly, the fallback's
-  // `window.open()` cannot be relied on inside a Tauri webview: it either
-  // does nothing or tries to open a second webview window pointed at
-  // wa.me, which is not what "share on WhatsApp" should do on a desktop.
+  // Desktop (Windows/macOS/Linux, WebView2/WebKit): the Web Share API isn't
+  // implemented there at all, so `nav.canShare`/`nav.share` are undefined
+  // and the branch below would never run anyway. More importantly, the
+  // fallback's `window.open()` can't be relied on inside a Tauri webview:
+  // it either does nothing or tries to open a second webview window pointed
+  // at wa.me, which is not what "share on WhatsApp" should do on a desktop.
   // So on desktop we skip the Web Share attempt entirely, save the PDF via
   // the native dialog, and hand the WhatsApp URL to the OS default browser
-  // through the opener plugin.
-  if (isDesktop()) {
+  // through the opener plugin. Android/iOS are excluded from this branch —
+  // `isDesktop()` is true there too (same Tauri global), but their system
+  // WebView does support `navigator.share`, which is the normal way to
+  // hand a file to another app on mobile.
+  if (isDesktop() && !isMobileShell()) {
     await downloadReceipt(doc, s);
     await openExternal(fallbackUrl);
     return "fallback";

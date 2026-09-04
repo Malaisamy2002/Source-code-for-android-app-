@@ -19,6 +19,24 @@ export function isDesktop(): boolean {
 }
 
 /**
+ * True when running inside Tauri's Android or iOS webview specifically, as
+ * opposed to the Windows/macOS/Linux desktop shell. `isDesktop()` is true
+ * for both (same `__TAURI_INTERNALS__` global), but several things that
+ * "just work" on the Windows WebView2 shell don't on Android/iOS:
+ * `contentWindow.print()` is unimplemented in Android's system WebView (it
+ * silently does nothing — there's no error to catch), `openPath()` from
+ * `tauri-plugin-opener` only supports opening URLs on mobile (not local
+ * files), and `window.open()` has no "new tab" to open into. Call sites for
+ * those need a mobile-specific fallback instead of assuming desktop
+ * behaviour just because `isDesktop()` is true.
+ */
+export function isMobileShell(): boolean {
+  if (!isDesktop()) return false;
+  if (typeof navigator === "undefined") return false;
+  return /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+}
+
+/**
  * Opens an external URL (e.g. a wa.me WhatsApp link) the right way for the
  * current shell.
  *
