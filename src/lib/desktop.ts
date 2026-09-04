@@ -80,54 +80,91 @@ export async function openExternal(url: string): Promise<boolean> {
  * + native write (`tauri-plugin-fs`). Solid here — WebView2/WebKit hand the
  * dialog a normal filesystem path.
  *
- * Mobile (Android/iOS): two previous approaches were tried and both failed
- * in the same way — 0-byte files:
- *   1. Save dialog + `tauri-plugin-fs` write to the picked path. Android's
- *      save dialog returns a SAF `content://` URI, not a filesystem path,
- *      and writing through that URI via `tauri-plugin-fs` is a documented,
- *      known-unreliable combination (tauri-apps/plugins-workspace#3109,
- *      tauri-apps/tauri#1094; the Tauri team's own guidance in
- *      tauri-apps/tauri discussion #10325 is to avoid it on Android).
- *   2. `navigator.share()` with the bytes as a `File`. This *looks* like it
- *      should sidestep the dialog entirely, but the Web Share API requires
- *      a secure (HTTPS) context to exist at all, and Tauri serves the app
- *      locally over a non-HTTPS scheme — so `navigator.share`/`canShare`
- *      are simply `undefined` inside a Tauri webview, on every Android
- *      device, always. The check below silently fails and falls through to
- *      approach 1, reproducing the original bug.
- *
- * What actually works: skip both the dialog and Web Share, and write
- * directly to `BaseDirectory.Download` via `tauri-plugin-fs`. This resolves
- * to the real, filesystem-backed public Downloads directory on Android (no
- * `content://` indirection), so the same `writeFile` that works reliably on
- * desktop also works here. It needs the `$DOWNLOAD` scope permission in
- * capabilities/default.json (added alongside this fix).
+ * Mobile (Android/iOS): public Downloads can't be written directly on Android
+ * 10+ (scoped storage), and the save dialog returns a `content://` URI that
+ * `tauri-plugin-fs` can't write to reliably. `navigator.share()` is also
+ * unavailable because Tauri's webview is not a secure (HTTPS) context. The
+ * reliable path is to write into the app's private storage
+ * (`BaseDirectory.AppData`) and then open the file with the OS default app
+ * (`tauri-plugin-opener` on mobile). That gives the user a real file they can
+ * share, print, or save to Downloads from the viewer.
  *
  * Returns `false` only when the write itself failed — callers use that to
  * avoid claiming success or deleting data that was never actually saved.
  */
+/** Bytes -> base64, chunked so large PDFs/workbooks don't blow the stack. */
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
 export async function saveFile(
   data: Uint8Array | string,
   filename: string,
   mimeType: string,
   dialogFilter?: { name: string; extensions: string[] },
+  openAfterSave = true,
 ): Promise<boolean> {
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
 
+  if (bytes.byteLength === 0) {
+    console.error("saveFile: refusing to save empty file", filename);
+    return false;
+  }
+
   if (isMobileShell()) {
+    // 1st choice on Android: the native MediaStore writer (Rust/Kotlin plugin
+    // in src-tauri/plugins/android-save). This is the only supported way to
+    // put a file in the *public* Downloads folder on Android 10+, and it
+    // reports back how many bytes really landed, so a blocked write can no
+    // longer look like a successful download.
     try {
-      const { writeFile, BaseDirectory, mkdir } = await import("@tauri-apps/plugin-fs");
-      // Downloads dir already exists on every real device, but `mkdir` with
-      // `recursive: true` is a safe no-op if so — cheap insurance against a
-      // fresh emulator image that doesn't have it yet.
-      await mkdir("", { baseDir: BaseDirectory.Download, recursive: true }).catch(() => {});
-      await writeFile(filename, new Uint8Array(bytes), { baseDir: BaseDirectory.Download });
+      const { invoke } = await import("@tauri-apps/api/core");
+      const result = await invoke<{ uri: string; bytesWritten: number }>(
+        "plugin:android-save|save_to_downloads",
+        {
+          payload: {
+            fileName: filename,
+            mimeType,
+            base64: toBase64(bytes),
+            openAfterSave: openAfterSave,
+          },
+        },
+      );
+      if (result && result.bytesWritten > 0) return true;
+      console.error("saveFile: native Downloads write reported 0 bytes", result);
+    } catch (nativeErr) {
+      console.warn("saveFile: native Downloads write unavailable", nativeErr);
+    }
+
+    // Fallback (iOS, or if the native plugin is missing): app-private storage
+    // plus "open with", which the user can then save or share from.
+    try {
+      const { writeFile, BaseDirectory, mkdir, appDataDir } = await import("@tauri-apps/plugin-fs");
+      const folder = "exports";
+      await mkdir(folder, { baseDir: BaseDirectory.AppData, recursive: true }).catch(() => {});
+      const relativePath = `${folder}/${filename}`;
+      await writeFile(relativePath, new Uint8Array(bytes), { baseDir: BaseDirectory.AppData });
+      try {
+        const { openPath } = await import("@tauri-apps/plugin-opener");
+        const base = await appDataDir();
+        const separator = base.endsWith("/") ? "" : "/";
+        await openPath(`${base}${separator}${relativePath}`);
+      } catch (openErr) {
+        console.warn("saveFile: could not open saved file", openErr);
+      }
       return true;
     } catch (err) {
-      console.error("saveFile: mobile Download write failed", err);
+      console.error("saveFile: mobile AppData write failed", err);
       return false;
     }
   }
+
+
 
   if (isDesktop()) {
     const { save } = await import("@tauri-apps/plugin-dialog");

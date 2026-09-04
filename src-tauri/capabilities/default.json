@@ -6,15 +6,26 @@
   "permissions": [
     "core:default",
     "opener:default",
+    "opener:allow-open-path",
     "dialog:default",
+    "android-save:default",
     "fs:default",
     "fs:allow-write",
     "fs:allow-write-text-file",
     "fs:allow-read-text-file",
     "fs:allow-mkdir",
+    "fs:allow-appdata-read",
+    "fs:allow-appdata-write",
+    "fs:allow-appcache-read",
+    "fs:allow-appcache-write",
     {
       "identifier": "fs:scope",
-      "allow": [{ "path": "$DOWNLOAD/**" }]
+      "allow": [
+        { "path": "$DOWNLOAD/**" },
+        { "path": "$APP/**" },
+        { "path": "$APP/exports/**" },
+        { "path": "$CACHE/**" }
+      ]
     }
   ]
 }

@@ -65,6 +65,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // Native MediaStore writer: puts exports in the real Downloads folder
+        // on Android (no-op error elsewhere, TS falls back automatically).
+        .plugin(tauri_plugin_android_save::init())
         .invoke_handler(tauri::generate_handler![
             keyring_native::keyring_get_token,
             keyring_native::keyring_set_token,
