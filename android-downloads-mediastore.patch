@@ -1,0 +1,540 @@
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 23183f4..7793ccf 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
+ tauri = { version = "2", features = [] }
+ tauri-plugin-opener = "2"
+ tauri-plugin-dialog = "2"
++tauri-plugin-android-save = { path = "plugins/android-save" }
+ tauri-plugin-fs = "2"
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+diff --git a/src-tauri/capabilities/default.json b/src-tauri/capabilities/default.json
+index 7f03a99..11e3330 100644
+--- a/src-tauri/capabilities/default.json
++++ b/src-tauri/capabilities/default.json
+@@ -6,15 +6,26 @@
+   "permissions": [
+     "core:default",
+     "opener:default",
++    "opener:allow-open-path",
+     "dialog:default",
++    "android-save:default",
+     "fs:default",
+     "fs:allow-write",
+     "fs:allow-write-text-file",
+     "fs:allow-read-text-file",
+     "fs:allow-mkdir",
++    "fs:allow-appdata-read",
++    "fs:allow-appdata-write",
++    "fs:allow-appcache-read",
++    "fs:allow-appcache-write",
+     {
+       "identifier": "fs:scope",
+-      "allow": [{ "path": "$DOWNLOAD/**" }]
++      "allow": [
++        { "path": "$DOWNLOAD/**" },
++        { "path": "$APP/**" },
++        { "path": "$APP/exports/**" },
++        { "path": "$CACHE/**" }
++      ]
+     }
+   ]
+ }
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index f6c5ef6..05f7d19 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -65,6 +65,9 @@ pub fn run() {
+         .plugin(tauri_plugin_opener::init())
+         .plugin(tauri_plugin_dialog::init())
+         .plugin(tauri_plugin_fs::init())
++        // Native MediaStore writer: puts exports in the real Downloads folder
++        // on Android (no-op error elsewhere, TS falls back automatically).
++        .plugin(tauri_plugin_android_save::init())
+         .invoke_handler(tauri::generate_handler![
+             keyring_native::keyring_get_token,
+             keyring_native::keyring_set_token,
+diff --git a/src/lib/desktop.ts b/src/lib/desktop.ts
+index 2c9c5d1..5b702e3 100644
+--- a/src/lib/desktop.ts
++++ b/src/lib/desktop.ts
+@@ -80,55 +80,92 @@ export async function openExternal(url: string): Promise<boolean> {
+  * + native write (`tauri-plugin-fs`). Solid here — WebView2/WebKit hand the
+  * dialog a normal filesystem path.
+  *
+- * Mobile (Android/iOS): two previous approaches were tried and both failed
+- * in the same way — 0-byte files:
+- *   1. Save dialog + `tauri-plugin-fs` write to the picked path. Android's
+- *      save dialog returns a SAF `content://` URI, not a filesystem path,
+- *      and writing through that URI via `tauri-plugin-fs` is a documented,
+- *      known-unreliable combination (tauri-apps/plugins-workspace#3109,
+- *      tauri-apps/tauri#1094; the Tauri team's own guidance in
+- *      tauri-apps/tauri discussion #10325 is to avoid it on Android).
+- *   2. `navigator.share()` with the bytes as a `File`. This *looks* like it
+- *      should sidestep the dialog entirely, but the Web Share API requires
+- *      a secure (HTTPS) context to exist at all, and Tauri serves the app
+- *      locally over a non-HTTPS scheme — so `navigator.share`/`canShare`
+- *      are simply `undefined` inside a Tauri webview, on every Android
+- *      device, always. The check below silently fails and falls through to
+- *      approach 1, reproducing the original bug.
+- *
+- * What actually works: skip both the dialog and Web Share, and write
+- * directly to `BaseDirectory.Download` via `tauri-plugin-fs`. This resolves
+- * to the real, filesystem-backed public Downloads directory on Android (no
+- * `content://` indirection), so the same `writeFile` that works reliably on
+- * desktop also works here. It needs the `$DOWNLOAD` scope permission in
+- * capabilities/default.json (added alongside this fix).
++ * Mobile (Android/iOS): public Downloads can't be written directly on Android
++ * 10+ (scoped storage), and the save dialog returns a `content://` URI that
++ * `tauri-plugin-fs` can't write to reliably. `navigator.share()` is also
++ * unavailable because Tauri's webview is not a secure (HTTPS) context. The
++ * reliable path is to write into the app's private storage
++ * (`BaseDirectory.AppData`) and then open the file with the OS default app
++ * (`tauri-plugin-opener` on mobile). That gives the user a real file they can
++ * share, print, or save to Downloads from the viewer.
+  *
+  * Returns `false` only when the write itself failed — callers use that to
+  * avoid claiming success or deleting data that was never actually saved.
+  */
++/** Bytes -> base64, chunked so large PDFs/workbooks don't blow the stack. */
++function toBase64(bytes: Uint8Array): string {
++  let binary = "";
++  const chunk = 0x8000;
++  for (let i = 0; i < bytes.length; i += chunk) {
++    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
++  }
++  return btoa(binary);
++}
++
+ export async function saveFile(
+   data: Uint8Array | string,
+   filename: string,
+   mimeType: string,
+   dialogFilter?: { name: string; extensions: string[] },
++  openAfterSave = true,
+ ): Promise<boolean> {
+   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+ 
++  if (bytes.byteLength === 0) {
++    console.error("saveFile: refusing to save empty file", filename);
++    return false;
++  }
++
+   if (isMobileShell()) {
++    // 1st choice on Android: the native MediaStore writer (Rust/Kotlin plugin
++    // in src-tauri/plugins/android-save). This is the only supported way to
++    // put a file in the *public* Downloads folder on Android 10+, and it
++    // reports back how many bytes really landed, so a blocked write can no
++    // longer look like a successful download.
++    try {
++      const { invoke } = await import("@tauri-apps/api/core");
++      const result = await invoke<{ uri: string; bytesWritten: number }>(
++        "plugin:android-save|save_to_downloads",
++        {
++          payload: {
++            fileName: filename,
++            mimeType,
++            base64: toBase64(bytes),
++            openAfterSave: openAfterSave,
++          },
++        },
++      );
++      if (result && result.bytesWritten > 0) return true;
++      console.error("saveFile: native Downloads write reported 0 bytes", result);
++    } catch (nativeErr) {
++      console.warn("saveFile: native Downloads write unavailable", nativeErr);
++    }
++
++    // Fallback (iOS, or if the native plugin is missing): app-private storage
++    // plus "open with", which the user can then save or share from.
+     try {
+-      const { writeFile, BaseDirectory, mkdir } = await import("@tauri-apps/plugin-fs");
+-      // Downloads dir already exists on every real device, but `mkdir` with
+-      // `recursive: true` is a safe no-op if so — cheap insurance against a
+-      // fresh emulator image that doesn't have it yet.
+-      await mkdir("", { baseDir: BaseDirectory.Download, recursive: true }).catch(() => {});
+-      await writeFile(filename, new Uint8Array(bytes), { baseDir: BaseDirectory.Download });
++      const { writeFile, BaseDirectory, mkdir, appDataDir } = await import("@tauri-apps/plugin-fs");
++      const folder = "exports";
++      await mkdir(folder, { baseDir: BaseDirectory.AppData, recursive: true }).catch(() => {});
++      const relativePath = `${folder}/${filename}`;
++      await writeFile(relativePath, new Uint8Array(bytes), { baseDir: BaseDirectory.AppData });
++      try {
++        const { openPath } = await import("@tauri-apps/plugin-opener");
++        const base = await appDataDir();
++        const separator = base.endsWith("/") ? "" : "/";
++        await openPath(`${base}${separator}${relativePath}`);
++      } catch (openErr) {
++        console.warn("saveFile: could not open saved file", openErr);
++      }
+       return true;
+     } catch (err) {
+-      console.error("saveFile: mobile Download write failed", err);
++      console.error("saveFile: mobile AppData write failed", err);
+       return false;
+     }
+   }
+ 
++
++
+   if (isDesktop()) {
+     const { save } = await import("@tauri-apps/plugin-dialog");
+     const { writeFile } = await import("@tauri-apps/plugin-fs");
+diff --git a/src-tauri/plugins/android-save/Cargo.toml b/src-tauri/plugins/android-save/Cargo.toml
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/Cargo.toml	2026-09-04 13:22:10.274599430 +0000
+@@ -0,0 +1,14 @@
++[package]
++name = "tauri-plugin-android-save"
++version = "0.1.0"
++edition = "2021"
++rust-version = "1.77.2"
++links = "tauri-plugin-android-save"
++
++[build-dependencies]
++tauri-plugin = { version = "2", features = ["build"] }
++
++[dependencies]
++tauri = { version = "2" }
++serde = { version = "1", features = ["derive"] }
++thiserror = "2"
+diff --git a/src-tauri/plugins/android-save/android/build.gradle.kts b/src-tauri/plugins/android-save/android/build.gradle.kts
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/android/build.gradle.kts	2026-09-04 13:22:31.935705996 +0000
+@@ -0,0 +1,27 @@
++plugins {
++    id("com.android.library")
++    id("org.jetbrains.kotlin.android")
++}
++
++android {
++    namespace = "app.tauri.androidsave"
++    compileSdk = 34
++
++    defaultConfig {
++        minSdk = 24
++        consumerProguardFiles("proguard-rules.pro")
++    }
++
++    compileOptions {
++        sourceCompatibility = JavaVersion.VERSION_17
++        targetCompatibility = JavaVersion.VERSION_17
++    }
++    kotlinOptions {
++        jvmTarget = "17"
++    }
++}
++
++dependencies {
++    implementation("androidx.core:core-ktx:1.13.1")
++    implementation(project(":tauri-android"))
++}
+diff --git a/src-tauri/plugins/android-save/android/proguard-rules.pro b/src-tauri/plugins/android-save/android/proguard-rules.pro
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/android/proguard-rules.pro	2026-09-04 13:22:32.898900767 +0000
+@@ -0,0 +1 @@
++-keep class app.tauri.androidsave.** { *; }
+diff --git a/src-tauri/plugins/android-save/android/src/main/AndroidManifest.xml b/src-tauri/plugins/android-save/android/src/main/AndroidManifest.xml
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/android/src/main/AndroidManifest.xml	2026-09-04 13:22:35.230099887 +0000
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <!-- Only needed on Android 9 and older; API 29+ writes through MediaStore,
++         which requires no runtime permission at all. -->
++    <uses-permission
++        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
++        android:maxSdkVersion="28" />
++</manifest>
+diff --git a/src-tauri/plugins/android-save/android/src/main/java/app/tauri/androidsave/AndroidSavePlugin.kt b/src-tauri/plugins/android-save/android/src/main/java/app/tauri/androidsave/AndroidSavePlugin.kt
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/android/src/main/java/app/tauri/androidsave/AndroidSavePlugin.kt	2026-09-04 13:22:53.190361343 +0000
+@@ -0,0 +1,135 @@
++package app.tauri.androidsave
++
++import android.app.Activity
++import android.content.ContentValues
++import android.content.Intent
++import android.os.Build
++import android.os.Environment
++import android.provider.MediaStore
++import android.util.Base64
++import androidx.core.content.FileProvider
++import app.tauri.annotation.Command
++import app.tauri.annotation.InvokeArg
++import app.tauri.annotation.TauriPlugin
++import app.tauri.plugin.Invoke
++import app.tauri.plugin.JSObject
++import app.tauri.plugin.Plugin
++import java.io.File
++
++@InvokeArg
++class SaveArgs {
++    lateinit var fileName: String
++    lateinit var mimeType: String
++    lateinit var base64: String
++    /** Open the saved file in a viewer afterwards (used by Print). */
++    var openAfterSave: Boolean = false
++}
++
++@TauriPlugin
++class AndroidSavePlugin(private val activity: Activity) : Plugin(activity) {
++
++    /**
++     * Writes the bytes into the device's public Downloads folder.
++     *
++     * API 29+ : MediaStore.Downloads insert + OutputStream (no permission needed,
++     *           and unlike direct filesystem writes it is not silently blocked,
++     *           which is what left 0-byte files behind).
++     * API 24-28: legacy direct write to the public Downloads directory.
++     */
++    @Command
++    fun saveToDownloads(invoke: Invoke) {
++        try {
++            val args = invoke.parseArgs(SaveArgs::class.java)
++            val bytes = Base64.decode(args.base64, Base64.DEFAULT)
++            if (bytes.isEmpty()) {
++                invoke.reject("refusing to save an empty file")
++                return
++            }
++
++            val uriString: String
++            var written = 0L
++
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                val resolver = activity.contentResolver
++                val values = ContentValues().apply {
++                    put(MediaStore.MediaColumns.DISPLAY_NAME, args.fileName)
++                    put(MediaStore.MediaColumns.MIME_TYPE, args.mimeType)
++                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
++                    put(MediaStore.MediaColumns.IS_PENDING, 1)
++                }
++                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
++                    ?: run {
++                        invoke.reject("MediaStore refused to create the file")
++                        return
++                    }
++                resolver.openOutputStream(uri)?.use { out ->
++                    out.write(bytes)
++                    out.flush()
++                    written = bytes.size.toLong()
++                } ?: run {
++                    resolver.delete(uri, null, null)
++                    invoke.reject("could not open an output stream for the new file")
++                    return
++                }
++                values.clear()
++                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
++                resolver.update(uri, values, null, null)
++                uriString = uri.toString()
++
++                if (args.openAfterSave) openUri(uri.toString(), args.mimeType, false)
++            } else {
++                val dir = Environment.getExternalStoragePublicDirectory(
++                    Environment.DIRECTORY_DOWNLOADS
++                )
++                if (!dir.exists()) dir.mkdirs()
++                val target = uniqueFile(dir, args.fileName)
++                target.outputStream().use { it.write(bytes) }
++                written = target.length()
++                uriString = target.absolutePath
++                if (args.openAfterSave) openFile(target, args.mimeType)
++            }
++
++            if (written == 0L) {
++                invoke.reject("file was created but nothing was written")
++                return
++            }
++
++            val result = JSObject()
++            result.put("uri", uriString)
++            result.put("bytesWritten", written)
++            invoke.resolve(result)
++        } catch (e: Exception) {
++            invoke.reject(e.message ?: e.toString())
++        }
++    }
++
++    private fun uniqueFile(dir: File, name: String): File {
++        var candidate = File(dir, name)
++        if (!candidate.exists()) return candidate
++        val dot = name.lastIndexOf('.')
++        val stem = if (dot > 0) name.substring(0, dot) else name
++        val ext = if (dot > 0) name.substring(dot) else ""
++        var i = 1
++        while (candidate.exists()) {
++            candidate = File(dir, "$stem ($i)$ext")
++            i++
++        }
++        return candidate
++    }
++
++    private fun openUri(uri: String, mimeType: String, grantWrite: Boolean) {
++        val intent = Intent(Intent.ACTION_VIEW).apply {
++            setDataAndType(android.net.Uri.parse(uri), mimeType)
++            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
++            if (grantWrite) addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
++        }
++        runCatching { activity.startActivity(intent) }
++    }
++
++    private fun openFile(file: File, mimeType: String) {
++        val uri = runCatching {
++            FileProvider.getUriForFile(activity, "${activity.packageName}.fileprovider", file)
++        }.getOrNull() ?: android.net.Uri.fromFile(file)
++        openUri(uri.toString(), mimeType, false)
++    }
++}
+diff --git a/src-tauri/plugins/android-save/build.rs b/src-tauri/plugins/android-save/build.rs
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/build.rs	2026-09-04 13:22:11.732034196 +0000
+@@ -0,0 +1,7 @@
++const COMMANDS: &[&str] = &["save_to_downloads"];
++
++fn main() {
++    tauri_plugin::Builder::new(COMMANDS)
++        .android_path("android")
++        .build();
++}
+diff --git a/src-tauri/plugins/android-save/permissions/default.toml b/src-tauri/plugins/android-save/permissions/default.toml
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/permissions/default.toml	2026-09-04 13:22:13.133491451 +0000
+@@ -0,0 +1,5 @@
++"$schema" = "schemas/schema.json"
++
++[default]
++description = "Allows saving generated files into the public Downloads folder."
++permissions = ["allow-save-to-downloads"]
+diff --git a/src-tauri/plugins/android-save/src/lib.rs b/src-tauri/plugins/android-save/src/lib.rs
+new file mode 100644
+--- /dev/null	2026-09-04 13:10:37.712544727 +0000
++++ b/src-tauri/plugins/android-save/src/lib.rs	2026-09-04 13:23:02.472694558 +0000
+@@ -0,0 +1,119 @@
++//! Saves a generated file (PDF / Excel / JSON backup) into the *public*
++//! Downloads folder on Android.
++//!
++//! Why this exists: on Android 10+ (scoped storage) the app can't write to
++//! `/storage/emulated/0/Download` directly, and `tauri-plugin-fs` can't write
++//! the `content://` URI the system save dialog hands back — that's what
++//! produced 0-byte files. The only supported route is `MediaStore` (API 29+)
++//! or a legacy `WRITE_EXTERNAL_STORAGE` write below that, which is what the
++//! Kotlin side of this plugin does.
++//!
++//! On non-Android targets the command returns an error, and the TypeScript
++//! caller falls back to the existing desktop/browser save paths.
++
++use serde::{Deserialize, Serialize};
++use tauri::{
++    plugin::{Builder, TauriPlugin},
++    Manager, Runtime,
++};
++
++#[cfg(target_os = "android")]
++const PLUGIN_IDENTIFIER: &str = "app.tauri.androidsave";
++
++#[derive(Debug, thiserror::Error)]
++pub enum Error {
++    #[error("{0}")]
++    Plugin(String),
++    #[cfg(target_os = "android")]
++    #[error(transparent)]
++    PluginInvoke(#[from] tauri::plugin::mobile::PluginInvokeError),
++}
++
++impl Serialize for Error {
++    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
++        serializer.serialize_str(&self.to_string())
++    }
++}
++
++pub type Result<T> = std::result::Result<T, Error>;
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SaveRequest {
++    /// File name including extension, e.g. `bill-1024.pdf`.
++    pub file_name: String,
++    /// MIME type, e.g. `application/pdf`.
++    pub mime_type: String,
++    /// File contents, base64 encoded (JSON can't carry raw bytes).
++    pub base64: String,
++    /// Open the saved file in the OS viewer afterwards (used by Print).
++    #[serde(default)]
++    pub open_after_save: bool,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SaveResponse {
++    /// `content://` URI (API 29+) or absolute path of the saved file.
++    pub uri: String,
++    /// Bytes actually written — the TS side rejects 0 so a silent failure
++    /// can never again look like a successful download.
++    pub bytes_written: u64,
++}
++
++#[cfg(target_os = "android")]
++pub struct AndroidSave<R: Runtime>(tauri::plugin::PluginHandle<R>);
++
++#[cfg(target_os = "android")]
++impl<R: Runtime> AndroidSave<R> {
++    pub fn save_to_downloads(&self, payload: SaveRequest) -> Result<SaveResponse> {
++        self.0
++            .run_mobile_plugin("saveToDownloads", payload)
++            .map_err(Into::into)
++    }
++}
++
++#[cfg(not(target_os = "android"))]
++pub struct AndroidSave<R: Runtime>(std::marker::PhantomData<R>);
++
++#[cfg(not(target_os = "android"))]
++impl<R: Runtime> AndroidSave<R> {
++    pub fn save_to_downloads(&self, _payload: SaveRequest) -> Result<SaveResponse> {
++        Err(Error::Plugin(
++            "android-save is only available on Android".into(),
++        ))
++    }
++}
++
++pub trait AndroidSaveExt<R: Runtime> {
++    fn android_save(&self) -> &AndroidSave<R>;
++}
++
++impl<R: Runtime, T: Manager<R>> AndroidSaveExt<R> for T {
++    fn android_save(&self) -> &AndroidSave<R> {
++        self.state::<AndroidSave<R>>().inner()
++    }
++}
++
++#[tauri::command]
++fn save_to_downloads<R: Runtime>(
++    app: tauri::AppHandle<R>,
++    payload: SaveRequest,
++) -> Result<SaveResponse> {
++    app.android_save().save_to_downloads(payload)
++}
++
++pub fn init<R: Runtime>() -> TauriPlugin<R> {
++    Builder::new("android-save")
++        .invoke_handler(tauri::generate_handler![save_to_downloads])
++        .setup(|app, _api| {
++            #[cfg(target_os = "android")]
++            let handle = _api.register_android_plugin(PLUGIN_IDENTIFIER, "AndroidSavePlugin")?;
++            #[cfg(target_os = "android")]
++            app.manage(AndroidSave(handle));
++            #[cfg(not(target_os = "android"))]
++            app.manage(AndroidSave::<R>(std::marker::PhantomData));
++            Ok(())
++        })
++        .build()
++}
