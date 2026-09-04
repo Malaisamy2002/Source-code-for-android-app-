@@ -1,6 +1,6 @@
 import { jsPDF } from "jspdf";
 import { BUSINESS_NAME, billGrossTotal, billPaidAmount, formatDMY, money, type Bill } from "./biz";
-import { isDesktop, isMobileShell, openExternal } from "./desktop";
+import { isDesktop, isMobileShell, openExternal, saveFile } from "./desktop";
 import { rupees } from "./money";
 import type { SnackSale, TurfBooking } from "./ops";
 import { paperInfo, paperWidthMm, readPrintSettings, type PrintSettings } from "./print";
@@ -380,15 +380,11 @@ export async function downloadReceipt(
 ): Promise<void> {
   const pdf = buildReceiptPdf(doc, s);
   if (isDesktop()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: `${doc.fileName}.pdf`,
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-    });
-    if (!path) return; // user cancelled
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
-    await writeFile(path, new Uint8Array(bytes));
+    await saveFile(new Uint8Array(bytes), `${doc.fileName}.pdf`, "application/pdf", {
+      name: "PDF",
+      extensions: ["pdf"],
+    });
     return;
   }
   pdf.save(`${doc.fileName}.pdf`);

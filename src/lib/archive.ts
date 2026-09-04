@@ -1,5 +1,5 @@
 import type { BackupFile } from "./backup";
-import { isDesktop } from "./desktop";
+import { saveFile } from "./desktop";
 import { db, resyncCounters } from "./localdb";
 import {
   githubPushFileAt,
@@ -106,32 +106,17 @@ export function githubArchivePath(cfg: GithubConfig, year: number) {
 }
 
 /**
- * Saves the archive snapshot. Browser/PWA: Blob download, same as before.
- * Desktop: native Save dialog + `tauri-plugin-fs`, matching backup.ts's
- * `downloadBackup`. Returns `false` if a desktop Save dialog was cancelled,
- * so `archiveYear` below can stop before deleting anything — the archive
- * must not be considered "downloaded" if the user backed out of the dialog.
+ * Saves the archive snapshot via `saveFile` (browser/desktop/mobile split —
+ * see desktop.ts). Returns `false` if the person cancelled a desktop Save
+ * dialog or a mobile share sheet, so `archiveYear` below can stop before
+ * deleting anything — the archive must not be considered "downloaded" if
+ * the file never actually landed anywhere.
  */
 async function downloadText(text: string, name: string): Promise<boolean> {
-  if (isDesktop()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: name,
-      filters: [{ name: "Ledger archive", extensions: ["db", "json"] }],
-    });
-    if (!path) return false;
-    await writeTextFile(path, text);
-    return true;
-  }
-  const blob = new Blob([text], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
-  return true;
+  return saveFile(text, name, "application/json", {
+    name: "Ledger archive",
+    extensions: ["db", "json"],
+  });
 }
 
 export type ArchiveResult = { year: number; rows: number; githubPath: string; fileName: string };

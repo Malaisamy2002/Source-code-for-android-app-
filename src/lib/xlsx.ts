@@ -1,5 +1,5 @@
 import ExcelJS from "exceljs";
-import { isDesktop } from "./desktop";
+import { saveFile } from "./desktop";
 
 export type SheetRow = Record<string, string | number>;
 
@@ -85,28 +85,10 @@ export async function exportWorkbook(sheets: SheetSpec[], filename: string) {
   }
   const name = `${filename}-${new Date().toISOString().slice(0, 10)}.xlsx`;
   const buffer = await wb.xlsx.writeBuffer();
-
-  if (isDesktop()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: name,
-      filters: [{ name: "Excel", extensions: ["xlsx"] }],
-    });
-    if (!path) return; // user cancelled
-    await writeFile(path, new Uint8Array(buffer));
-    return;
-  }
-
-  const blob = new Blob([buffer], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
+  await saveFile(
+    new Uint8Array(buffer),
+    name,
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    { name: "Excel", extensions: ["xlsx"] },
+  );
 }

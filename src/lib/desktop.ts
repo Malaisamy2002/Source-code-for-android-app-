@@ -68,3 +68,83 @@ export async function openExternal(url: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Saves bytes/text to a file, across all three shells this app ships to.
+ * Used by every "download" button in the app (Excel export, receipt/report
+ * PDFs, backups, year archives) so the fix below only has to exist once.
+ *
+ * Browser/PWA: plain Blob + `<a download>` click (unchanged, always worked).
+ *
+ * Desktop (Windows/macOS/Linux): native Save dialog (`tauri-plugin-dialog`)
+ * + native write (`tauri-plugin-fs`). Solid here — WebView2/WebKit hand the
+ * dialog a normal filesystem path.
+ *
+ * Mobile (Android/iOS): the same dialog+fs pairing is a known source of
+ * files that get "created" but end up with 0 bytes. Android's save dialog
+ * returns a SAF `content://` URI, not a filesystem path, and writing
+ * through that URI via `tauri-plugin-fs` is unreliable — this is a
+ * documented issue in Tauri's own plugin repo (writes reporting success but
+ * not landing on disk / Google Drive, tauri-apps/plugins-workspace#3109)
+ * and in Tauri's core repo for binary writes generally (tauri-apps/tauri
+ * #1094), and the Tauri team's own guidance has been to avoid writing to a
+ * dialog-picked path on Android at all (tauri-apps/tauri discussion
+ * #10325). So on mobile we skip the Save dialog entirely and hand the
+ * bytes straight to the OS share sheet (`navigator.share`) — the person
+ * picks "Save to Drive", "Save to Downloads", or any app that takes files.
+ * If the share sheet isn't available for some reason, we still attempt the
+ * dialog+fs path as a last resort rather than doing nothing.
+ *
+ * Returns `false` only when the person cancelled (a Save dialog or the
+ * share sheet) — callers use that to avoid claiming success or deleting
+ * data that was never actually saved anywhere.
+ */
+export async function saveFile(
+  data: Uint8Array | string,
+  filename: string,
+  mimeType: string,
+  dialogFilter?: { name: string; extensions: string[] },
+): Promise<boolean> {
+  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+
+  if (isMobileShell()) {
+    const nav = navigator as Navigator & {
+      canShare?: (data: ShareData) => boolean;
+      share?: (data: ShareData) => Promise<void>;
+    };
+    const file = new File([new Uint8Array(bytes)], filename, { type: mimeType });
+    if (nav.canShare?.({ files: [file] }) && nav.share) {
+      try {
+        await nav.share({ files: [file] });
+        return true;
+      } catch {
+        return false; // person backed out of the share sheet
+      }
+    }
+    // Web Share unavailable — fall through to the dialog+fs attempt below,
+    // which at least has a chance of working rather than doing nothing.
+  }
+
+  if (isDesktop()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({
+      defaultPath: filename,
+      filters: dialogFilter ? [dialogFilter] : undefined,
+    });
+    if (!path) return false; // user cancelled
+    await writeFile(path, new Uint8Array(bytes));
+    return true;
+  }
+
+  const blob = new Blob([new Uint8Array(bytes)], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  return true;
+}

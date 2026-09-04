@@ -1,5 +1,5 @@
 import { jsPDF } from "jspdf";
-import { isDesktop, openExternal } from "./desktop";
+import { isDesktop, isMobileShell, openExternal, saveFile } from "./desktop";
 import { rupees } from "./money";
 import { readPrintSettings, type PrintSettings } from "./print";
 
@@ -145,36 +145,36 @@ export function buildReportPdf(doc: ReportPdfDoc, s: PrintSettings = readPrintSe
 }
 
 /** Saves the report PDF — same desktop-save-dialog-vs-browser-download split
- * as `downloadReceipt` in receipt.ts. */
+ * as `downloadReceipt` in receipt.ts (including the mobile share-sheet
+ * route inside `saveFile`, which avoids Android's dialog+fs 0-byte bug). */
 export async function downloadReportPdf(
   doc: ReportPdfDoc,
   s: PrintSettings = readPrintSettings(),
 ): Promise<void> {
   const pdf = buildReportPdf(doc, s);
   if (isDesktop()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: `${doc.fileName}.pdf`,
-      filters: [{ name: "PDF", extensions: ["pdf"] }],
-    });
-    if (!path) return;
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
-    await writeFile(path, new Uint8Array(bytes));
+    await saveFile(new Uint8Array(bytes), `${doc.fileName}.pdf`, "application/pdf", {
+      name: "PDF",
+      extensions: ["pdf"],
+    });
     return;
   }
   pdf.save(`${doc.fileName}.pdf`);
 }
 
 /** Shares the report PDF via WhatsApp where possible, falling back to a
- * plain download — mirrors `shareReceipt`'s desktop/mobile/browser split. */
+ * plain download — mirrors `shareReceipt`'s desktop/mobile/browser split.
+ * `isMobileShell()` keeps Android/iOS out of the desktop-only branch below,
+ * since their WebView does support `navigator.share` even though
+ * `isDesktop()` is also true there (same Tauri global as real desktop). */
 export async function shareReportPdf(
   doc: ReportPdfDoc,
   fallbackUrl: string,
   s: PrintSettings = readPrintSettings(),
 ): Promise<"shared" | "fallback" | "cancelled"> {
   const pdf = buildReportPdf(doc, s);
-  if (isDesktop()) {
+  if (isDesktop() && !isMobileShell()) {
     await downloadReportPdf(doc, s);
     await openExternal(fallbackUrl);
     return "fallback";
