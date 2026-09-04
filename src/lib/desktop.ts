@@ -144,7 +144,8 @@ export async function saveFile(
     // Fallback (iOS, or if the native plugin is missing): app-private storage
     // plus "open with", which the user can then save or share from.
     try {
-      const { writeFile, BaseDirectory, mkdir, appDataDir } = await import("@tauri-apps/plugin-fs");
+      const { writeFile, BaseDirectory, mkdir } = await import("@tauri-apps/plugin-fs");
+      const { appDataDir } = await import("@tauri-apps/api/path");
       const folder = "exports";
       await mkdir(folder, { baseDir: BaseDirectory.AppData, recursive: true }).catch(() => {});
       const relativePath = `${folder}/${filename}`;
@@ -171,7 +172,7 @@ export async function saveFile(
     const { writeFile } = await import("@tauri-apps/plugin-fs");
     const path = await save({
       defaultPath: filename,
-      filters: dialogFilter ? [dialogFilter] : undefined,
+      ...(dialogFilter ? { filters: [dialogFilter] } : {}),
     });
     if (!path) return false; // user cancelled
     await writeFile(path, new Uint8Array(bytes));

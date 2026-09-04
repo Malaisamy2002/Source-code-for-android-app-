@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
-import { Archive, Database, FileDown } from "lucide-react";
+import { Database, FileDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -32,7 +32,6 @@ import {
   verificationPdfDoc,
 } from "@/lib/verificationSeed";
 import { currentYear, distinctYears, RETAINED_YEARS } from "@/lib/years";
-import { SectionHeading } from "./SectionHeading";
 
 /** Settings → year archive: status, manual archive, and a load-test helper. */
 export function ArchiveCard() {
@@ -153,7 +152,6 @@ export function ArchiveCard() {
 
   return (
     <section className="space-y-3">
-      <SectionHeading eyebrow="DATA LIFECYCLE" title="Year archive" icon={Archive} />
       <Card className="frost">
         <CardContent className="space-y-4 p-4">
           <p className="text-sm text-muted-foreground">

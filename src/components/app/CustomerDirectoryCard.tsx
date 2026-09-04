@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Search, Trash2, Sparkles, Users } from "lucide-react";
+import { Plus, Search, Trash2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -32,7 +32,6 @@ import { compareBy, useSortState, type SortOption } from "@/lib/sort";
 
 import { CustomerDetailDialog } from "./CustomerDetailDialog";
 import { MergeCustomersDialog } from "./MergeCustomersDialog";
-import { SectionHeading } from "./SectionHeading";
 import { SortMenu } from "./SortMenu";
 
 type CustomerSortField = "name" | "recent" | "due";
@@ -181,20 +180,15 @@ export function CustomerDirectoryCard() {
 
   return (
     <section className="space-y-3">
-      <SectionHeading
-        eyebrow="CUSTOMERS"
-        title="Customer database"
-        icon={Users}
-        action={
-          <SortMenu
-            options={CUSTOMER_SORT_OPTIONS}
-            field={sort.field}
-            dir={sort.dir}
-            onFieldChange={sort.setField}
-            onToggleDir={sort.toggleDir}
-          />
-        }
-      />
+      <div className="flex justify-end">
+        <SortMenu
+          options={CUSTOMER_SORT_OPTIONS}
+          field={sort.field}
+          dir={sort.dir}
+          onFieldChange={sort.setField}
+          onToggleDir={sort.toggleDir}
+        />
+      </div>
       <Card className="frost">
         <CardContent className="space-y-3 p-4">
           <CustomerDetailDialog

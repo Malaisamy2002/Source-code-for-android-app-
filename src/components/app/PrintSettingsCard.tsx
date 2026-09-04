@@ -27,7 +27,6 @@ import {
   type PaperId,
 } from "@/lib/print";
 import { buildReceiptPdf, printReceipt, type ReceiptDoc } from "@/lib/receipt";
-import { SectionHeading } from "./SectionHeading";
 
 const sample: ReceiptDoc = {
   kind: "Sample",
@@ -51,7 +50,6 @@ export function PrintSettingsCard() {
 
   return (
     <section className="space-y-3">
-      <SectionHeading eyebrow="RECEIPTS" title="Printer & receipt format" icon={Printer} />
       <Card className="frost">
         <CardContent className="space-y-4 p-4">
           <div className="space-y-1">

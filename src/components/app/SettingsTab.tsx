@@ -1,6 +1,23 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Save, SlidersHorizontal, Trash2 } from "lucide-react";
+import {
+  Archive,
+  CalendarClock,
+  FlaskConical,
+  Github,
+  ImageIcon,
+  MessageCircle,
+  Palette,
+  Plus,
+  Printer,
+  Receipt,
+  Save,
+  SlidersHorizontal,
+  Tags,
+  Trash2,
+  Users,
+  UtensilsCrossed,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -40,6 +57,7 @@ import {
 } from "@/lib/ops";
 import { compareBy, useSortState, type SortOption } from "@/lib/sort";
 import { SectionHeading } from "./SectionHeading";
+import { SettingsSection } from "./SettingsSection";
 import { SortMenu } from "./SortMenu";
 import { PrintSettingsCard } from "./PrintSettingsCard";
 import { InvoiceBrandingCard } from "./InvoiceBrandingCard";
@@ -532,29 +550,68 @@ export function SettingsTab() {
         hint="Pricing, menu, branding, printing and backups — all in one place"
         icon={SlidersHorizontal}
       />
-      <ThemeCustomizerCard />
-      <InvoiceBrandingCard />
-      <BillingSettingsCard />
-      <WhatsAppSummaryCard />
-      <MonthlyReportCard />
-      <LoadTestCard />
+      <SettingsSection
+        id="github-backup"
+        eyebrow="DATA SAFETY"
+        title="GitHub backup & restore"
+        hint="Push and pull your data from your GitHub repository"
+        icon={Github}
+        defaultOpen
+      >
+        <BackupCard />
+      </SettingsSection>
 
-      <section className="space-y-3">
-        <SectionHeading
-          eyebrow="PRICING"
-          title="Turf rates"
-          action={
-            rates.length > 0 ? (
-              <SortMenu
-                options={TURF_RATE_SORT_OPTIONS}
-                field={rateSort.field}
-                dir={rateSort.dir}
-                onFieldChange={rateSort.setField}
-                onToggleDir={rateSort.toggleDir}
-              />
-            ) : undefined
-          }
-        />
+      <SettingsSection id="theme" eyebrow="LOOK & FEEL" title="Theme" icon={Palette}>
+        <ThemeCustomizerCard />
+      </SettingsSection>
+
+      <SettingsSection
+        id="branding"
+        eyebrow="BRANDING"
+        title="Invoice generator"
+        icon={ImageIcon}
+      >
+        <InvoiceBrandingCard />
+      </SettingsSection>
+
+      <SettingsSection id="billing" eyebrow="BILLING" title="Billing & GST" icon={Receipt}>
+        <BillingSettingsCard />
+      </SettingsSection>
+
+      <SettingsSection
+        id="whatsapp"
+        eyebrow="SHARING"
+        title="WhatsApp summary"
+        icon={MessageCircle}
+      >
+        <WhatsAppSummaryCard />
+      </SettingsSection>
+
+      <SettingsSection
+        id="monthly-report"
+        eyebrow="REMINDERS"
+        title="Monthly report"
+        icon={CalendarClock}
+      >
+        <MonthlyReportCard />
+      </SettingsSection>
+
+      <SettingsSection id="load-test" eyebrow="DIAGNOSTICS" title="Load test" icon={FlaskConical}>
+        <LoadTestCard />
+      </SettingsSection>
+
+      <SettingsSection id="turf-rates" eyebrow="PRICING" title="Turf rates" icon={Tags}>
+        {rates.length > 0 && (
+          <div className="flex justify-end">
+            <SortMenu
+              options={TURF_RATE_SORT_OPTIONS}
+              field={rateSort.field}
+              dir={rateSort.dir}
+              onFieldChange={rateSort.setField}
+              onToggleDir={rateSort.toggleDir}
+            />
+          </div>
+        )}
         <Card className="frost">
           <CardContent className="space-y-3 p-4">
             {sortedRates.map((r) => (
@@ -610,24 +667,25 @@ export function SettingsTab() {
             </p>
           </CardContent>
         </Card>
-      </section>
+      </SettingsSection>
 
-      <section className="space-y-3">
-        <SectionHeading
-          eyebrow="MENU"
-          title="Snack items"
-          action={
-            items.length > 0 ? (
-              <SortMenu
-                options={SNACK_ITEM_SORT_OPTIONS}
-                field={itemSort.field}
-                dir={itemSort.dir}
-                onFieldChange={itemSort.setField}
-                onToggleDir={itemSort.toggleDir}
-              />
-            ) : undefined
-          }
-        />
+      <SettingsSection
+        id="snack-items"
+        eyebrow="MENU"
+        title="Snack items"
+        icon={UtensilsCrossed}
+      >
+        {items.length > 0 && (
+          <div className="flex justify-end">
+            <SortMenu
+              options={SNACK_ITEM_SORT_OPTIONS}
+              field={itemSort.field}
+              dir={itemSort.dir}
+              onFieldChange={itemSort.setField}
+              onToggleDir={itemSort.toggleDir}
+            />
+          </div>
+        )}
         <Card className="frost">
           <CardContent className="space-y-3 p-4">
             {sortedItems.map((i) => (
@@ -700,24 +758,25 @@ export function SettingsTab() {
             </div>
           </CardContent>
         </Card>
-      </section>
+      </SettingsSection>
 
-      <section className="space-y-3">
-        <SectionHeading
-          eyebrow="MENU"
-          title="Snack combos"
-          action={
-            combos.length > 0 ? (
-              <SortMenu
-                options={SNACK_COMBO_SORT_OPTIONS}
-                field={comboSort.field}
-                dir={comboSort.dir}
-                onFieldChange={comboSort.setField}
-                onToggleDir={comboSort.toggleDir}
-              />
-            ) : undefined
-          }
-        />
+      <SettingsSection
+        id="snack-combos"
+        eyebrow="MENU"
+        title="Snack combos"
+        icon={UtensilsCrossed}
+      >
+        {combos.length > 0 && (
+          <div className="flex justify-end">
+            <SortMenu
+              options={SNACK_COMBO_SORT_OPTIONS}
+              field={comboSort.field}
+              dir={comboSort.dir}
+              onFieldChange={comboSort.setField}
+              onToggleDir={comboSort.toggleDir}
+            />
+          </div>
+        )}
         <Card className="frost">
           <CardContent className="space-y-3 p-4">
             {sortedCombos.map((c) => (
@@ -780,14 +839,24 @@ export function SettingsTab() {
             </div>
           </CardContent>
         </Card>
-      </section>
+      </SettingsSection>
 
-      <PrintSettingsCard />
+      <SettingsSection
+        id="printing"
+        eyebrow="RECEIPTS"
+        title="Printer & receipt format"
+        icon={Printer}
+      >
+        <PrintSettingsCard />
+      </SettingsSection>
 
-      <CustomerDirectoryCard />
+      <SettingsSection id="customers" eyebrow="CUSTOMERS" title="Customer database" icon={Users}>
+        <CustomerDirectoryCard />
+      </SettingsSection>
 
-      <ArchiveCard />
-      <BackupCard />
+      <SettingsSection id="archive" eyebrow="DATA LIFECYCLE" title="Year archive" icon={Archive}>
+        <ArchiveCard />
+      </SettingsSection>
     </div>
   );
 }

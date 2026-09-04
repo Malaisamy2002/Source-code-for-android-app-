@@ -1,12 +1,11 @@
 import { toast } from "sonner";
-import { Plus, Receipt, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatInvoiceNo, newCustomTaxId, useAppSettings, type CustomTax } from "@/lib/settings";
-import { SectionHeading } from "./SectionHeading";
 
 export function BillingSettingsCard() {
   const { settings, save } = useAppSettings();
@@ -15,7 +14,6 @@ export function BillingSettingsCard() {
 
   return (
     <section className="space-y-3">
-      <SectionHeading eyebrow="BILLING" title="Billing & GST" icon={Receipt} />
       <Card className="frost">
         <CardContent className="space-y-4 p-4">
           <label className="flex items-center justify-between gap-3 text-sm">

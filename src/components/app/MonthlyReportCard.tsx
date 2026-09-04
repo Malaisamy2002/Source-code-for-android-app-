@@ -1,15 +1,12 @@
-import { CalendarClock } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { useAppSettings } from "@/lib/settings";
-import { SectionHeading } from "./SectionHeading";
 
 export function MonthlyReportCard() {
   const { settings, save } = useAppSettings();
 
   return (
     <section className="space-y-3">
-      <SectionHeading eyebrow="REMINDERS" title="Monthly report" icon={CalendarClock} />
       <Card className="frost">
         <CardContent className="frost-soft lift rounded-xl p-4">
           <label className="flex items-center justify-between gap-3">
