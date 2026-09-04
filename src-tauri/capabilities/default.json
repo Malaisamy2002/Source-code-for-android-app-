@@ -10,6 +10,11 @@
     "fs:default",
     "fs:allow-write",
     "fs:allow-write-text-file",
-    "fs:allow-read-text-file"
+    "fs:allow-read-text-file",
+    "fs:allow-mkdir",
+    {
+      "identifier": "fs:scope",
+      "allow": [{ "path": "$DOWNLOAD/**" }]
+    }
   ]
 }
