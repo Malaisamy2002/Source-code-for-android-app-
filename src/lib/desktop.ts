@@ -80,24 +80,31 @@ export async function openExternal(url: string): Promise<boolean> {
  * + native write (`tauri-plugin-fs`). Solid here — WebView2/WebKit hand the
  * dialog a normal filesystem path.
  *
- * Mobile (Android/iOS): the same dialog+fs pairing is a known source of
- * files that get "created" but end up with 0 bytes. Android's save dialog
- * returns a SAF `content://` URI, not a filesystem path, and writing
- * through that URI via `tauri-plugin-fs` is unreliable — this is a
- * documented issue in Tauri's own plugin repo (writes reporting success but
- * not landing on disk / Google Drive, tauri-apps/plugins-workspace#3109)
- * and in Tauri's core repo for binary writes generally (tauri-apps/tauri
- * #1094), and the Tauri team's own guidance has been to avoid writing to a
- * dialog-picked path on Android at all (tauri-apps/tauri discussion
- * #10325). So on mobile we skip the Save dialog entirely and hand the
- * bytes straight to the OS share sheet (`navigator.share`) — the person
- * picks "Save to Drive", "Save to Downloads", or any app that takes files.
- * If the share sheet isn't available for some reason, we still attempt the
- * dialog+fs path as a last resort rather than doing nothing.
+ * Mobile (Android/iOS): two previous approaches were tried and both failed
+ * in the same way — 0-byte files:
+ *   1. Save dialog + `tauri-plugin-fs` write to the picked path. Android's
+ *      save dialog returns a SAF `content://` URI, not a filesystem path,
+ *      and writing through that URI via `tauri-plugin-fs` is a documented,
+ *      known-unreliable combination (tauri-apps/plugins-workspace#3109,
+ *      tauri-apps/tauri#1094; the Tauri team's own guidance in
+ *      tauri-apps/tauri discussion #10325 is to avoid it on Android).
+ *   2. `navigator.share()` with the bytes as a `File`. This *looks* like it
+ *      should sidestep the dialog entirely, but the Web Share API requires
+ *      a secure (HTTPS) context to exist at all, and Tauri serves the app
+ *      locally over a non-HTTPS scheme — so `navigator.share`/`canShare`
+ *      are simply `undefined` inside a Tauri webview, on every Android
+ *      device, always. The check below silently fails and falls through to
+ *      approach 1, reproducing the original bug.
  *
- * Returns `false` only when the person cancelled (a Save dialog or the
- * share sheet) — callers use that to avoid claiming success or deleting
- * data that was never actually saved anywhere.
+ * What actually works: skip both the dialog and Web Share, and write
+ * directly to `BaseDirectory.Download` via `tauri-plugin-fs`. This resolves
+ * to the real, filesystem-backed public Downloads directory on Android (no
+ * `content://` indirection), so the same `writeFile` that works reliably on
+ * desktop also works here. It needs the `$DOWNLOAD` scope permission in
+ * capabilities/default.json (added alongside this fix).
+ *
+ * Returns `false` only when the write itself failed — callers use that to
+ * avoid claiming success or deleting data that was never actually saved.
  */
 export async function saveFile(
   data: Uint8Array | string,
@@ -108,21 +115,18 @@ export async function saveFile(
   const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
 
   if (isMobileShell()) {
-    const nav = navigator as Navigator & {
-      canShare?: (data: ShareData) => boolean;
-      share?: (data: ShareData) => Promise<void>;
-    };
-    const file = new File([new Uint8Array(bytes)], filename, { type: mimeType });
-    if (nav.canShare?.({ files: [file] }) && nav.share) {
-      try {
-        await nav.share({ files: [file] });
-        return true;
-      } catch {
-        return false; // person backed out of the share sheet
-      }
+    try {
+      const { writeFile, BaseDirectory, mkdir } = await import("@tauri-apps/plugin-fs");
+      // Downloads dir already exists on every real device, but `mkdir` with
+      // `recursive: true` is a safe no-op if so — cheap insurance against a
+      // fresh emulator image that doesn't have it yet.
+      await mkdir("", { baseDir: BaseDirectory.Download, recursive: true }).catch(() => {});
+      await writeFile(filename, new Uint8Array(bytes), { baseDir: BaseDirectory.Download });
+      return true;
+    } catch (err) {
+      console.error("saveFile: mobile Download write failed", err);
+      return false;
     }
-    // Web Share unavailable — fall through to the dialog+fs attempt below,
-    // which at least has a chance of working rather than doing nothing.
   }
 
   if (isDesktop()) {
