@@ -1,5 +1,5 @@
 import type { BackupFile } from "./backup";
-import { isDesktop, isMobileShell } from "./desktop";
+import { isDesktop } from "./desktop";
 
 export type GithubConfig = {
   owner: string;
@@ -53,7 +53,7 @@ function writeMeta(meta: Meta) {
 }
 
 async function readToken(): Promise<string> {
-  if (isDesktop() && !isMobileShell()) {
+  if (isDesktop()) {
     const { invoke } = await import("@tauri-apps/api/core");
     try {
       return (
@@ -75,7 +75,7 @@ async function readToken(): Promise<string> {
 }
 
 async function writeToken(token: string): Promise<void> {
-  if (isDesktop() && !isMobileShell()) {
+  if (isDesktop()) {
     const { invoke } = await import("@tauri-apps/api/core");
     if (token) {
       await invoke("keyring_set_token", {

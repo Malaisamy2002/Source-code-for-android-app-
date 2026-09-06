@@ -114,6 +114,96 @@ export function BackupCard() {
     <section className="space-y-3">
       <Card className="frost">
         <CardHeader>
+          <CardTitle className="text-base">Single-file backup</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Exports every customer, bill, expense, booking and snack sale into one
+            <code className="mx-1 rounded bg-muted px-1">.db</code> file you can keep or move to
+            another device.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              disabled={busy !== null}
+              onClick={() =>
+                run("export", async () => {
+                  const backup = await buildBackup();
+                  const savedTo = await downloadBackup(backup);
+                  if (savedTo === null) return; // user cancelled the save dialog
+                  writeAppSettings({
+                    ...readAppSettings(),
+                    lastBackupAt: new Date().toISOString(),
+                  });
+                  toast.success(isDesktop() ? "Backup saved" : "Backup file downloaded", {
+                    description: backupSummary(backup),
+                  });
+                })
+              }
+            >
+              <Download className="mr-1 h-4 w-4" /> Export .db file
+            </Button>
+            <Button
+              variant="outline"
+              disabled={busy !== null}
+              onClick={() => {
+                if (isDesktop()) {
+                  void run("import", async () => {
+                    const text = await pickBackupFile();
+                    if (text === null) return; // user cancelled the open dialog
+                    await applyBackup(text);
+                  });
+                  return;
+                }
+                fileRef.current?.click();
+              }}
+            >
+              <Upload className="mr-1 h-4 w-4" /> Import .db file
+            </Button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".db,.json,application/json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                void run("import", async () => applyBackup(await file.text()));
+              }}
+            />
+          </div>
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={merge} onCheckedChange={setMerge} />
+            Merge with existing data (off = replace everything)
+          </label>
+
+          <div className="frost-well flex flex-wrap items-center justify-between gap-2 rounded-xl p-3">
+            <div className="text-sm">
+              <p className="micro-label">Backup reminders</p>
+              <span className="block text-xs text-muted-foreground">
+                {appSettings.lastBackupAt
+                  ? `Last backup: ${shortDate(appSettings.lastBackupAt)}`
+                  : "No backup downloaded yet on this device."}
+              </span>
+            </div>
+            <div className="flex gap-2">
+              {(["off", "daily", "weekly"] as BackupReminder[]).map((opt) => (
+                <Button
+                  key={opt}
+                  size="sm"
+                  variant={appSettings.backupReminder === opt ? "default" : "outline"}
+                  onClick={() => saveAppSettings({ ...appSettings, backupReminder: opt })}
+                >
+                  {opt === "off" ? "Off" : opt === "daily" ? "Daily" : "Weekly"}
+                </Button>
+              ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="frost">
+        <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <Github className="h-4 w-4" /> GitHub backup
           </CardTitle>
@@ -232,96 +322,6 @@ export function BackupCard() {
               </div>
             </>
           )}
-        </CardContent>
-      </Card>
-
-      <Card className="frost">
-        <CardHeader>
-          <CardTitle className="text-base">Single-file backup</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <p className="text-sm text-muted-foreground">
-            Exports every customer, bill, expense, booking and snack sale into one
-            <code className="mx-1 rounded bg-muted px-1">.db</code> file you can keep or move to
-            another device.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={busy !== null}
-              onClick={() =>
-                run("export", async () => {
-                  const backup = await buildBackup();
-                  const savedTo = await downloadBackup(backup);
-                  if (savedTo === null) return; // user cancelled the save dialog
-                  writeAppSettings({
-                    ...readAppSettings(),
-                    lastBackupAt: new Date().toISOString(),
-                  });
-                  toast.success(isDesktop() ? "Backup saved" : "Backup file downloaded", {
-                    description: backupSummary(backup),
-                  });
-                })
-              }
-            >
-              <Download className="mr-1 h-4 w-4" /> Export .db file
-            </Button>
-            <Button
-              variant="outline"
-              disabled={busy !== null}
-              onClick={() => {
-                if (isDesktop()) {
-                  void run("import", async () => {
-                    const text = await pickBackupFile();
-                    if (text === null) return; // user cancelled the open dialog
-                    await applyBackup(text);
-                  });
-                  return;
-                }
-                fileRef.current?.click();
-              }}
-            >
-              <Upload className="mr-1 h-4 w-4" /> Import .db file
-            </Button>
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".db,.json,application/json"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                e.target.value = "";
-                if (!file) return;
-                void run("import", async () => applyBackup(await file.text()));
-              }}
-            />
-          </div>
-          <label className="flex items-center gap-2 text-sm">
-            <Switch checked={merge} onCheckedChange={setMerge} />
-            Merge with existing data (off = replace everything)
-          </label>
-
-          <div className="frost-well flex flex-wrap items-center justify-between gap-2 rounded-xl p-3">
-            <div className="text-sm">
-              <p className="micro-label">Backup reminders</p>
-              <span className="block text-xs text-muted-foreground">
-                {appSettings.lastBackupAt
-                  ? `Last backup: ${shortDate(appSettings.lastBackupAt)}`
-                  : "No backup downloaded yet on this device."}
-              </span>
-            </div>
-            <div className="flex gap-2">
-              {(["off", "daily", "weekly"] as BackupReminder[]).map((opt) => (
-                <Button
-                  key={opt}
-                  size="sm"
-                  variant={appSettings.backupReminder === opt ? "default" : "outline"}
-                  onClick={() => saveAppSettings({ ...appSettings, backupReminder: opt })}
-                >
-                  {opt === "off" ? "Off" : opt === "daily" ? "Daily" : "Weekly"}
-                </Button>
-              ))}
-            </div>
-          </div>
         </CardContent>
       </Card>
 

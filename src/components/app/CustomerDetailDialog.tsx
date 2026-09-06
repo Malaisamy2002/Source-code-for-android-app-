@@ -10,7 +10,6 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import {
-  balanceOf,
   billGrossTotal,
   customerTag,
   formatDMY,
@@ -23,13 +22,16 @@ import { useSnackSales, useTurfBookings } from "@/lib/ops";
 import { isFinancialBooking } from "@/lib/analytics";
 import {
   billDue,
+  billMovedToDues,
+  bookingCashCollected,
   bookingDue,
   customerOutstanding,
+  dueNoForRef,
   isFinancialSale,
   saleStateLabel,
   type CustomerDues,
 } from "@/lib/dues";
-import { tabKey, useTabEntries, useTabSummaries } from "@/lib/tabs";
+import { TAB_REF_BILL, tabKey, useTabEntries, useTabSummaries } from "@/lib/tabs";
 import { CustomerTabCard } from "./CustomerTabCard";
 
 type Props = {
@@ -181,8 +183,8 @@ export function CustomerDetailDialog({ name, phone, onOpenChange }: Props) {
                       note={
                         billDue(b, myEntries) > 0
                           ? `Paid ${money(b.status === "paid" ? billGrossTotal(b) : b.amount_paid)} · Due ${money(billDue(b, myEntries))}`
-                          : balanceOf(b) > 0
-                            ? "On tab"
+                          : billMovedToDues(b, myEntries)
+                            ? `On tab · ${dueNoForRef(myEntries, TAB_REF_BILL, b.id, b.invoice_no, b.bill_date)}`
                             : b.status
                       }
                     />
@@ -207,7 +209,9 @@ export function CustomerDetailDialog({ name, phone, onOpenChange }: Props) {
                         b.merged_into_bill_id
                           ? "Merged into bill"
                           : due > 0
-                            ? `Paid ${money(b.advance_paid)} · Due ${money(due)}`
+                            ? // Real cash taken, never `advance_paid` at face
+                              // value — a balance moved to dues inflates that.
+                              `Paid ${money(bookingCashCollected(b, myEntries))} · Due ${money(due)}`
                             : b.status
                       }
                     />

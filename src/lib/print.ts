@@ -22,7 +22,7 @@ export const PAPER_TYPES = [
 export type PaperId = (typeof PAPER_TYPES)[number]["id"];
 export type PaperKind = (typeof PAPER_TYPES)[number]["kind"];
 
-export function paperInfo(paper: PaperId) {
+export function paperInfo(paper: PaperId): (typeof PAPER_TYPES)[number] & { heightMm?: number } {
   return PAPER_TYPES.find((p) => p.id === paper) ?? PAPER_TYPES.find((p) => p.id === "80mm")!;
 }
 
@@ -187,7 +187,13 @@ export function writePrintSettings(value: PrintSettings) {
  * honouring the custom-width field when "custom" is selected. */
 export function paperWidthMm(s: Pick<PrintSettings, "paper" | "customWidthMm">) {
   const info = paperInfo(s.paper);
-  if (s.paper === "custom") return Math.max(30, Math.min(300, s.customWidthMm || 72));
+  // Floor of 50mm — the narrowest paper the item table's #/label/qty/amount
+  // column layout can actually lay out without the columns' anchor points
+  // colliding (worst case: "Extra large" text on an auto-margin roll). That
+  // matches the narrowest built-in preset (Thermal 2" / 50mm) already
+  // offered, so custom rolls never go narrower than real hardware this app
+  // ships a preset for.
+  if (s.paper === "custom") return Math.max(50, Math.min(300, s.customWidthMm || 72));
   return info.widthMm;
 }
 

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Gauge, FileDown, Trash2, Play, Database } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { FlaskConical, Gauge, FileDown, Trash2, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -11,195 +12,239 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { downloadReportPdf } from "@/lib/report-pdf";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
+  LOAD_TEST_MIXES,
   benchmarkPdfDoc,
   clearLoadTestData,
   countLoadTestRows,
   estimatedRows,
-  loadTestYears,
-  LOAD_TEST_MIXES,
+  loadTestYear,
   runLoadTestBenchmark,
   seedLoadTestData,
-  type BenchmarkResult,
+  type LoadTestBenchmark,
+  type LoadTestCounts,
+  type LoadTestMix,
+  type SeedProgress,
 } from "@/lib/loadtest";
+import { downloadReportPdf } from "@/lib/report-pdf";
 
-type MixKey = keyof typeof LOAD_TEST_MIXES;
+const fmt = (n: number) => n.toLocaleString("en-IN");
 
-const ms = (n: number) => `${n < 10 ? n.toFixed(1) : n.toFixed(0)} ms`;
+function CountLine({ counts }: { counts: LoadTestCounts }) {
+  return (
+    <p className="text-sm text-muted-foreground">
+      Currently seeded: {fmt(counts.total)} rows — {fmt(counts.customers)} customers,{" "}
+      {fmt(counts.snackItems)} snack items, {fmt(counts.bookings)} bookings, {fmt(counts.sales)}{" "}
+      sales, {fmt(counts.bills)} bills, {fmt(counts.expenses)} expenses, {fmt(counts.stockHistory)}{" "}
+      stock changes, {fmt(counts.tabEntries)} tab entries on {fmt(counts.tabs)} tabs.
+    </p>
+  );
+}
 
-/**
- * Settings-only tool: seeds five years of synthetic ledger data and times the
- * reads, analytics, PDF and Excel paths at that scale. Generated rows are
- * tagged so "Remove test data" deletes exactly them.
- */
+/** Settings → Load test: seeds one realistic year of demo data (or removes it
+ * again), and times how the app holds up on that dataset. Everything it writes
+ * is tagged `lt-` / `LT-`, so removal touches exactly those rows and nothing
+ * else. */
 export function LoadTestCard() {
-  const years = loadTestYears();
-  const [rows, setRows] = useState<number | null>(null);
-  const [busy, setBusy] = useState<null | "seed" | "bench" | "clear">(null);
-  const [progress, setProgress] = useState({ done: 0, total: 1, label: "" });
-  const [result, setResult] = useState<BenchmarkResult | null>(null);
-  const [mixKey, setMixKey] = useState<MixKey>("light");
-  const mix = LOAD_TEST_MIXES[mixKey].mix;
+  const qc = useQueryClient();
+  const year = loadTestYear();
+  const [mix, setMix] = useState<LoadTestMix>("light");
+  const [busy, setBusy] = useState<"seed" | "bench" | "pdf" | "remove" | null>(null);
+  const [progress, setProgress] = useState<SeedProgress | null>(null);
+  const [counts, setCounts] = useState<LoadTestCounts | null>(null);
+  const [result, setResult] = useState<LoadTestBenchmark | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
-  const refresh = () => countLoadTestRows().then(setRows);
+  const refreshCounts = () => countLoadTestRows().then(setCounts).catch(() => {});
   useEffect(() => {
-    refresh();
+    void refreshCounts();
   }, []);
 
-  const seed = async () => {
+  const seeded = (counts?.total ?? 0) > 0;
+  const est = estimatedRows(mix);
+
+  const runSeed = async () => {
     setBusy("seed");
-    setProgress({ done: 0, total: 60, label: "Starting…" });
+    setProgress({ month: 0, months: 12, rows: 0 });
     try {
-      const { rows: written, ms: took } = await seedLoadTestData({ mix }, setProgress);
-      toast.success(
-        `Seeded ${written.toLocaleString("en-IN")} records in ${(took / 1000).toFixed(1)}s`,
-      );
-      refresh();
+      const r = await seedLoadTestData(mix, setProgress);
+      await qc.invalidateQueries();
+      refreshCounts();
+      toast.success(`Seeded ${fmt(r.total)} rows for ${r.year}`);
     } catch (e) {
-      toast.error(`Seeding failed: ${(e as Error).message}`);
+      toast.error((e as Error).message);
     } finally {
       setBusy(null);
+      setProgress(null);
     }
   };
 
-  const bench = async () => {
+  const runBench = async () => {
     setBusy("bench");
-    setProgress({ done: 0, total: years.length + 1, label: "Starting…" });
     try {
-      const r = await runLoadTestBenchmark(years, setProgress);
+      const r = await runLoadTestBenchmark();
       setResult(r);
-      toast.success(`Benchmark done in ${(r.totalMs / 1000).toFixed(1)}s`);
+      toast.success(`Benchmark done in ${fmt(r.totalMs)} ms`);
     } catch (e) {
-      toast.error(`Benchmark failed: ${(e as Error).message}`);
+      toast.error((e as Error).message);
     } finally {
       setBusy(null);
     }
   };
 
-  const clear = async () => {
-    setBusy("clear");
+  const runPdf = async () => {
+    if (!result) return;
+    setBusy("pdf");
+    try {
+      await downloadReportPdf(benchmarkPdfDoc(result));
+    } catch (e) {
+      toast.error((e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const runRemove = async () => {
+    setBusy("remove");
     try {
       const removed = await clearLoadTestData();
+      await qc.invalidateQueries();
+      refreshCounts();
       setResult(null);
-      toast.success(`Removed ${removed.toLocaleString("en-IN")} test records`);
-      refresh();
+      toast.success(`Removed ${fmt(removed.total)} load-test rows`);
+    } catch (e) {
+      toast.error((e as Error).message);
     } finally {
       setBusy(null);
+      setConfirmRemove(false);
     }
   };
 
-  const pct = Math.round((progress.done / Math.max(1, progress.total)) * 100);
-
   return (
-    <Card className="frost">
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Gauge className="h-4 w-4" /> 5-year load test
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4 p-4 pt-0">
-        <p className="text-sm text-muted-foreground">
-          Generates {years[0]}–{years[years.length - 1]} of synthetic bookings, snack sales, bills
-          and expenses (~{estimatedRows(mix).toLocaleString("en-IN")} records at the{" "}
-          {LOAD_TEST_MIXES[mixKey].label.toLowerCase()} pace) and times the year reads, report
-          maths, PDF and Excel exports. Test rows are tagged and removable.
-        </p>
+    <section className="space-y-3">
+      <Card className="frost">
+        <CardContent className="space-y-4 p-4">
+          <p className="text-sm text-muted-foreground">
+            Fills {year} with realistic demo data — {est.bookings.toLocaleString("en-IN")} turf
+            bookings across the seven 11:30 AM–6:30 PM slots on 3 courts, snack sales that actually
+            deplete stock, bills, expenses and a few moved-to-dues records — so you can try every
+            screen under load. Everything is tagged and removable in one tap.
+          </p>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">Daily load</span>
-          <Select value={mixKey} onValueChange={(v) => setMixKey(v as MixKey)} disabled={!!busy}>
-            <SelectTrigger className="h-9 w-56">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(Object.keys(LOAD_TEST_MIXES) as MixKey[]).map((k) => (
-                <SelectItem key={k} value={k}>
-                  {LOAD_TEST_MIXES[k].label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        <div className="flex items-center gap-2 text-sm">
-          <Database className="h-4 w-4 text-muted-foreground" />
-          <span className="tabular-nums">
-            {rows === null ? "…" : rows.toLocaleString("en-IN")} test records in the database
-          </span>
-        </div>
-
-        {busy && busy !== "clear" ? (
-          <div className="space-y-1">
-            <Progress value={pct} />
-            <p className="text-xs text-muted-foreground">{progress.label}</p>
-          </div>
-        ) : null}
-
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={seed} disabled={busy !== null} size="sm">
-            <Play className="mr-1 h-4 w-4" /> Seed 5 years
-          </Button>
-          <Button onClick={bench} disabled={busy !== null || !rows} size="sm" variant="secondary">
-            <Gauge className="mr-1 h-4 w-4" /> Run benchmark
-          </Button>
-          <Button
-            onClick={() => result && downloadReportPdf(benchmarkPdfDoc(result))}
-            disabled={busy !== null || !result}
-            size="sm"
-            variant="outline"
-          >
-            <FileDown className="mr-1 h-4 w-4" /> Results PDF
-          </Button>
-          <Button onClick={clear} disabled={busy !== null || !rows} size="sm" variant="destructive">
-            <Trash2 className="mr-1 h-4 w-4" /> Remove test data
-          </Button>
-        </div>
-
-        {result ? (
-          <div className="space-y-3">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm tabular-nums">
-                <thead className="text-xs text-muted-foreground">
-                  <tr>
-                    <th className="py-1 text-left">Year</th>
-                    <th className="py-1 text-right">Rows</th>
-                    <th className="py-1 text-right">Read</th>
-                    <th className="py-1 text-right">Analytics</th>
-                    <th className="py-1 text-right">PDF</th>
-                    <th className="py-1 text-right">Excel</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {result.years.map((y) => (
-                    <tr key={y.year} className="border-t border-border/60">
-                      <td className="py-1 text-left">{y.year}</td>
-                      <td className="py-1 text-right">{y.rows.toLocaleString("en-IN")}</td>
-                      <td className="py-1 text-right">{ms(y.readMs)}</td>
-                      <td className="py-1 text-right">{ms(y.analyticsMs)}</td>
-                      <td className="py-1 text-right">
-                        {ms(y.pdfMs)} · {y.pdfKb} KB
-                      </td>
-                      <td className="py-1 text-right">
-                        {ms(y.excelMs)} · {y.excelKb} KB
-                      </td>
-                    </tr>
+          <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+            <div className="space-y-1">
+              <Label className="micro-label">Data mix</Label>
+              <Select value={mix} onValueChange={(v) => setMix(v as LoadTestMix)} disabled={!!busy}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(LOAD_TEST_MIXES) as LoadTestMix[]).map((k) => (
+                    <SelectItem key={k} value={k}>
+                      {LOAD_TEST_MIXES[k].label} — ~{fmt(estimatedRows(k).total)} rows
+                    </SelectItem>
                   ))}
-                </tbody>
-              </table>
+                </SelectContent>
+              </Select>
             </div>
-            <div className="rounded-md border border-border/60 p-3 text-sm">
-              <p className="font-medium">All five years at once</p>
-              <p className="text-muted-foreground tabular-nums">
-                {result.allYears.rows.toLocaleString("en-IN")} rows · read{" "}
-                {ms(result.allYears.readMs)} · analytics {ms(result.allYears.analyticsMs)} · PDF{" "}
-                {ms(result.allYears.pdfMs)} ({result.allYears.pdfKb} KB) · whole run{" "}
-                {(result.totalMs / 1000).toFixed(1)} s
+            <Button onClick={() => void runSeed()} disabled={!!busy}>
+              <Play className="mr-2 h-4 w-4" />
+              {busy === "seed"
+                ? `Seeding month ${progress?.month ?? 1} of 12…`
+                : seeded
+                  ? "Re-seed one year"
+                  : "Seed one year"}
+            </Button>
+          </div>
+
+          {busy === "seed" && progress && (
+            <div className="space-y-1">
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
+                <div
+                  className="h-full bg-primary transition-all"
+                  style={{ width: `${Math.round((progress.month / progress.months) * 100)}%` }}
+                />
+              </div>
+              <p className="micro-label text-muted-foreground">
+                Writing month {progress.month} of {progress.months} — {fmt(progress.rows)} rows so
+                far
               </p>
             </div>
+          )}
+
+          {counts && seeded && <CountLine counts={counts} />}
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={() => void runBench()}
+              disabled={!!busy || !seeded}
+            >
+              <Gauge className="mr-2 h-4 w-4" />
+              {busy === "bench" ? "Benchmarking…" : "Run benchmark"}
+            </Button>
+            <Button variant="outline" onClick={() => void runPdf()} disabled={!!busy || !result}>
+              <FileDown className="mr-2 h-4 w-4" />
+              {busy === "pdf" ? "Saving…" : "Results PDF"}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => setConfirmRemove(true)}
+              disabled={!!busy || !seeded}
+            >
+              <Trash2 className="mr-2 h-4 w-4" /> Remove load-test data
+            </Button>
           </div>
-        ) : null}
-      </CardContent>
-    </Card>
+
+          {result && (
+            <div className="frost-soft space-y-1 rounded-xl border p-3 text-sm">
+              <p className="font-medium">
+                <FlaskConical className="mr-1 inline h-4 w-4" />
+                Last run: {fmt(result.rows)} records in {fmt(result.totalMs)} ms
+              </p>
+              <p className="text-muted-foreground">
+                Read {fmt(result.readMs)} ms · analytics {fmt(result.analyticsMs)} ms · PDF{" "}
+                {fmt(result.pdfMs)} ms
+              </p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <AlertDialog open={confirmRemove} onOpenChange={(open) => !busy && setConfirmRemove(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove the load-test data?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This deletes the {counts ? fmt(counts.total) : ""} rows the load test wrote —
+              customers, snack items, bookings, sales, bills, expenses, stock history and tab
+              entries tagged <strong>LT-</strong>. Your own records are not touched.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={!!busy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={!!busy}
+              onClick={(e) => {
+                e.preventDefault();
+                void runRemove();
+              }}
+            >
+              {busy === "remove" ? "Removing…" : "Yes, remove it"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </section>
   );
 }

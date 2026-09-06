@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Bill, BillItem, BillStatus, Expense, HistoryEntry } from "./biz";
 import { isFinancialBooking } from "./analytics";
+import { billDue, bookingDue } from "./dues";
+import { tabBalanceOf, tabKey, type TabEntry } from "./tabs";
 import { unmergeBill } from "./merge";
-import { hasCustomNumbering, nextCustomInvoiceNo, readAppSettings } from "./settings";
+import { hasCustomNumbering, nextCustomInvoiceNo, readAppSettings, taxBreakdown } from "./settings";
 import { db, newId, nextInvoiceNo, nowIso, sortBy, type BillRow, type ExpenseRow } from "./localdb";
 import { rowsForYears, useYearWindow, type YearTable } from "./years";
 
@@ -136,6 +138,10 @@ export function useCreateBill() {
       amount_paid: number;
       /** Optional: e.g. "On tab" when the due moves to a running customer tab. */
       payment_mode?: string | null;
+      /** Optional frozen tax carried over from a bill being duplicated, so a
+       * copy totals exactly like its original even if GST changed since. */
+      tax_amount?: number | undefined;
+      tax_lines?: { label: string; value: number }[] | undefined;
     }) => {
       const appSettings = readAppSettings();
       let invoiceNo: string;
@@ -149,6 +155,14 @@ export function useCreateBill() {
       }
 
       const now = nowIso();
+      // Tax is computed ONCE here, from the settings in effect at creation,
+      // and stored on the bill — so a later GST rate/toggle change can never
+      // move this invoice's Grand Total or its reprint (lib/biz.ts
+      // billGrossTotal).
+      const fresh = taxBreakdown(payload.total, appSettings);
+      const carried = payload.tax_lines !== undefined || payload.tax_amount !== undefined;
+      const taxAmount = carried ? (payload.tax_amount ?? 0) : fresh.taxAmount;
+      const taxLines = carried ? (payload.tax_lines ?? []) : fresh.lines;
       const bill = {
         id: newId(),
         invoice_no: invoiceNo,
@@ -158,6 +172,8 @@ export function useCreateBill() {
         subtotal: payload.subtotal,
         discount: payload.discount,
         total: payload.total,
+        tax_amount: taxAmount,
+        tax_lines: taxLines,
         status: payload.status,
         amount_paid: payload.amount_paid,
         payment_mode: payload.payment_mode ?? null,
@@ -318,10 +334,19 @@ export type CustomerLifetime = {
   /** Average value per turf booking (all bookings, merged or not — this is
    *  a per-booking stat, not a cash total, so merge status doesn't matter). */
   avgBookingValue: number;
-  /** Sum of (total_amount - advance_paid) across this customer's unmerged
-   *  turf bookings — a booking merged into a bill is settled through that
-   *  bill instead, matching the app-wide "Outstanding turf dues" convention. */
+  /** Sum of bookingDue() (dues.ts) across this customer's unmerged turf
+   *  bookings — tax-inclusive, tab-aware, the same figure the Turf tab, Dues
+   *  tab and Dashboard show for the same booking. A booking merged into a
+   *  bill is settled through that bill instead, matching the app-wide
+   *  "Outstanding turf dues" convention. */
   outstandingTurfDues: number;
+  /** Sum of billDue() across this customer's bills (tax-inclusive, tab-aware). */
+  outstandingBillDues: number;
+  /** This customer's running-tab balance (charges minus payments, never negative). */
+  outstandingTab: number;
+  /** Everything still owed: turf dues + bill dues + running tab — the same
+   *  total customerOutstanding() (dues.ts) shows in the customer dialog. */
+  outstandingTotal: number;
   /** ISO date of the earliest bill/booking/sale matched to this customer. */
   firstActivity: string | null;
   /** ISO date of the most recent bill/booking/sale matched to this customer. */
@@ -329,22 +354,37 @@ export type CustomerLifetime = {
 };
 
 /**
- * Rolls up lifetime turf-booking count and total spend (bills + unmerged
- * bookings + snack sales) per saved customer, matched by the same
- * phone-first / name-fallback identity rule `useMergeCustomers` already
- * uses when re-tagging records — kept as one function so both places stay
- * in sync instead of maintaining their own copy of "same customer or not".
+ * Phone-first identity: when BOTH the saved customer and the record carry a
+ * phone number, only the numbers are compared — two different people who
+ * happen to share a name must never collapse into one row. Name matching is
+ * the fallback only when at least one side has no phone at all.
+ */
+export function matchesCustomer(
+  c: { name: string; phone: string | null },
+  name: string | null | undefined,
+  phone?: string | null,
+) {
+  const cPhone = normPhone(c.phone);
+  const rPhone = normPhone(phone);
+  if (cPhone && rPhone) return cPhone === rPhone;
+  return normName(name) === normName(c.name);
+}
+
+/**
+ * Rolls up lifetime turf-booking count, total spend (bills + unmerged
+ * bookings + snack sales) and everything still owed (turf dues + bill dues
+ * + running tab) per saved customer, matched by the phone-first /
+ * name-fallback identity rule in `matchesCustomer` — the same rule
+ * `useMergeCustomers` uses when re-tagging records — kept as one function
+ * so every screen agrees on "same customer or not".
  */
 export function customerLifetimeStats(
   customers: CustomerRec[],
   data: {
-    bills: {
-      customer_name: string;
-      customer_phone: string | null;
-      total: number;
-      bill_date: string;
-    }[];
+    bills: (Pick<Bill, "customer_name" | "customer_phone" | "total" | "bill_date"> &
+      Partial<Pick<Bill, "id" | "status" | "amount_paid" | "payment_mode" | "tax_amount" | "tax_lines">>)[];
     bookings: {
+      id: string;
       customer_name: string;
       phone: string | null;
       total_amount: number;
@@ -352,15 +392,29 @@ export function customerLifetimeStats(
       booking_date: string;
       status: string;
       merged_into_bill_id?: string | null;
+      // Needed to route outstandingTurfDues through the same tax-inclusive
+      // bookingDue() the Turf/Dues tabs and Dashboard use (dues.ts) instead
+      // of re-deriving total_amount - advance_paid by hand, which silently
+      // ignores tax on a taxed booking.
+      turf_amount: number;
+      hours: number;
+      rate_per_hour: number;
+      courts: number;
+      snacks_total?: number;
+      discount?: number;
+      tax_amount?: number;
+      tax_lines?: { label: string; value: number }[];
     }[];
-    sales: { customer_name: string | null; total: number; sale_date: string }[];
+    sales: { customer_name: string | null; phone?: string | null; total: number; sale_date: string }[];
+    /** The tab ledger — without it a balance moved to the tab is invisible here. */
+    tabEntries?: TabEntry[];
   },
 ): CustomerLifetime[] {
+  const entries = data.tabEntries ?? [];
   return customers.map((c) => {
-    const nameMatch = normName(c.name);
-    const phoneMatch = normPhone(c.phone);
     const matches = (name: string | null | undefined, phone?: string | null) =>
-      normName(name) === nameMatch || (!!phoneMatch && normPhone(phone) === phoneMatch);
+      matchesCustomer(c, name, phone);
+    const myEntries = entries.filter((e) => e.customer_key === tabKey(c.name, c.phone));
 
     let bookingsCount = 0;
     let billsSpend = 0;
@@ -368,6 +422,7 @@ export function customerLifetimeStats(
     let snacksSpend = 0;
     let turfGrossForAvg = 0;
     let outstandingTurfDues = 0;
+    let outstandingBillDues = 0;
     let firstActivity: string | null = null;
     let lastActivity: string | null = null;
     const bump = (iso: string) => {
@@ -378,6 +433,9 @@ export function customerLifetimeStats(
     for (const b of data.bills) {
       if (matches(b.customer_name, b.customer_phone)) {
         billsSpend += Number(b.total) || 0;
+        // Callers that pass full bills get the canonical tax-inclusive,
+        // tab-aware billDue(); a projected row without status owes nothing.
+        if (b.id && b.status) outstandingBillDues += billDue(b as Bill, myEntries);
         bump(b.bill_date);
       }
     }
@@ -397,21 +455,21 @@ export function customerLifetimeStats(
         // cancelled) booking still counts as a real visit that happened.
         if (isFinancialBooking(b)) {
           turfSpend += Number(b.total_amount) || 0;
-          outstandingTurfDues += Math.max(
-            0,
-            (Number(b.total_amount) || 0) - (Number(b.advance_paid) || 0),
-          );
+          // Tax-inclusive and tab-aware, via the same bookingDue() the Turf
+          // tab, Dues tab and Dashboard use.
+          outstandingTurfDues += bookingDue(b, myEntries);
         }
         bump(b.booking_date);
       }
     }
     for (const s of data.sales) {
-      if (matches(s.customer_name)) {
+      if (matches(s.customer_name, s.phone)) {
         snacksSpend += Number(s.total) || 0;
         bump(s.sale_date);
       }
     }
 
+    const outstandingTab = Math.max(0, tabBalanceOf(myEntries));
     const totalSpend = billsSpend + turfSpend + snacksSpend;
     const avgBookingValue = bookingsCount > 0 ? turfGrossForAvg / bookingsCount : 0;
 
@@ -426,6 +484,9 @@ export function customerLifetimeStats(
       snacksSpend,
       avgBookingValue,
       outstandingTurfDues,
+      outstandingBillDues,
+      outstandingTab,
+      outstandingTotal: outstandingTurfDues + outstandingBillDues + outstandingTab,
       firstActivity,
       lastActivity,
     };

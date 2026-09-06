@@ -22,6 +22,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { archiveYear, readArchiveLog, yearRowCount, type ArchiveRecord } from "@/lib/archive";
+import { formatDMY } from "@/lib/biz";
 import { isDesktop } from "@/lib/desktop";
 import { clearTestData } from "@/lib/devdata";
 import { downloadReportPdf } from "@/lib/report-pdf";
@@ -33,7 +34,7 @@ import {
 } from "@/lib/verificationSeed";
 import { currentYear, distinctYears, RETAINED_YEARS } from "@/lib/years";
 
-/** Settings → year archive: status, manual archive, and a load-test helper. */
+/** Settings → year archive: status, manual archive, and a verification-data helper. */
 export function ArchiveCard() {
   const qc = useQueryClient();
   const [years, setYears] = useState<number[]>([]);
@@ -204,7 +205,7 @@ export function ArchiveCard() {
               {log.map((r) => (
                 <div key={r.year}>
                   {r.year} · {r.rows.toLocaleString("en-IN")} records ·{" "}
-                  {new Date(r.archived_at).toLocaleDateString()} · {r.github_path}
+                  {formatDMY(r.archived_at)} · {r.github_path}
                 </div>
               ))}
             </div>
@@ -245,11 +246,11 @@ export function ArchiveCard() {
           <p className="text-xs text-muted-foreground">
             Adds a small, hand-computed dataset across Jul–Aug 2026 (merged booking, cancelled
             booking, partial/unpaid bills, a month-boundary edge case, GST 18% + 5% service) so
-            Dashboard and Reports totals can be checked by hand. "Verification results PDF" runs
-            the app's real calculators against this data and downloads a PASS/FAIL table next to
-            every hand-computed figure, so a mismatch is easy to spot without redoing any
-            arithmetic. Tagged with a "VER-" prefix, so "Clear verification data" only removes
-            these rows — nothing else.
+            Dashboard and Reports totals can be checked by hand. "Verification results PDF" runs the
+            app's real calculators against this data and downloads a PASS/FAIL table next to every
+            hand-computed figure, so a mismatch is easy to spot without redoing any arithmetic.
+            Tagged with a "VER-" prefix, so "Clear verification data" only removes these rows —
+            nothing else.
           </p>
         </CardContent>
 

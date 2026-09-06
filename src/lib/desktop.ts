@@ -19,24 +19,6 @@ export function isDesktop(): boolean {
 }
 
 /**
- * True when running inside Tauri's Android or iOS webview specifically, as
- * opposed to the Windows/macOS/Linux desktop shell. `isDesktop()` is true
- * for both (same `__TAURI_INTERNALS__` global), but several things that
- * "just work" on the Windows WebView2 shell don't on Android/iOS:
- * `contentWindow.print()` is unimplemented in Android's system WebView (it
- * silently does nothing — there's no error to catch), `openPath()` from
- * `tauri-plugin-opener` only supports opening URLs on mobile (not local
- * files), and `window.open()` has no "new tab" to open into. Call sites for
- * those need a mobile-specific fallback instead of assuming desktop
- * behaviour just because `isDesktop()` is true.
- */
-export function isMobileShell(): boolean {
-  if (!isDesktop()) return false;
-  if (typeof navigator === "undefined") return false;
-  return /android|iphone|ipad|ipod/i.test(navigator.userAgent);
-}
-
-/**
  * Opens an external URL (e.g. a wa.me WhatsApp link) the right way for the
  * current shell.
  *
@@ -70,123 +52,145 @@ export async function openExternal(url: string): Promise<boolean> {
 }
 
 /**
- * Saves bytes/text to a file, across all three shells this app ships to.
- * Used by every "download" button in the app (Excel export, receipt/report
- * PDFs, backups, year archives) so the fix below only has to exist once.
- *
- * Browser/PWA: plain Blob + `<a download>` click (unchanged, always worked).
- *
- * Desktop (Windows/macOS/Linux): native Save dialog (`tauri-plugin-dialog`)
- * + native write (`tauri-plugin-fs`). Solid here — WebView2/WebKit hand the
- * dialog a normal filesystem path.
- *
- * Mobile (Android/iOS): public Downloads can't be written directly on Android
- * 10+ (scoped storage), and the save dialog returns a `content://` URI that
- * `tauri-plugin-fs` can't write to reliably. `navigator.share()` is also
- * unavailable because Tauri's webview is not a secure (HTTPS) context. The
- * reliable path is to write into the app's private storage
- * (`BaseDirectory.AppData`) and then open the file with the OS default app
- * (`tauri-plugin-opener` on mobile). That gives the user a real file they can
- * share, print, or save to Downloads from the viewer.
- *
- * Returns `false` only when the write itself failed — callers use that to
- * avoid claiming success or deleting data that was never actually saved.
+ * Root folder name under Windows' Documents (and the equivalent on
+ * macOS/Linux) that all of the app's user-visible desktop files live under
+ * — `Documents/TurfApp/Invoices/...`, `Documents/TurfApp/Receipts/...` —
+ * so everything the app writes is easy to find in Explorer instead of
+ * buried in the hidden AppData folder.
  */
-/** Bytes -> base64, chunked so large PDFs/workbooks don't blow the stack. */
-function toBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+const APP_DOCS_FOLDER = "TurfApp";
+
+/**
+ * Which `BaseDirectory` + resolver pair backs `APP_DOCS_FOLDER` on this
+ * shell. On Windows/macOS/Linux this is always the user's Documents folder
+ * (matches the doc comment above — Explorer-visible, no scoped-storage
+ * restrictions). On Android, `documentDir()`/`BaseDirectory.Document` is not
+ * guaranteed to resolve to a writable, app-accessible location the same way
+ * — Android's scoped-storage rules are the whole reason §3 of
+ * docs/android-port-notes.md exists — so this falls back to the app's own
+ * private storage (`BaseDirectory.AppLocalData`, no permission prompt
+ * needed) if the Documents directory isn't usable. This has **not** been
+ * verified on a physical Android device yet; do that before relying on it,
+ * per docs/android-port-notes.md.
+ *
+ * Cached after the first successful resolution so every subsequent call
+ * doesn't re-probe.
+ */
+let cachedAppDocsBase: { baseDir: import("@tauri-apps/plugin-fs").BaseDirectory; root: () => Promise<string> } | null =
+  null;
+
+async function resolveAppDocsBase() {
+  if (cachedAppDocsBase) return cachedAppDocsBase;
+  const { BaseDirectory } = await import("@tauri-apps/plugin-fs");
+  const { documentDir, appLocalDataDir } = await import("@tauri-apps/api/path");
+  try {
+    const root = await documentDir();
+    cachedAppDocsBase = { baseDir: BaseDirectory.Document, root: async () => root };
+  } catch {
+    // No usable Documents directory on this shell (expected on Android) —
+    // fall back to app-private storage, which needs no runtime permission.
+    cachedAppDocsBase = { baseDir: BaseDirectory.AppLocalData, root: appLocalDataDir };
   }
-  return btoa(binary);
+  return cachedAppDocsBase;
 }
 
-export async function saveFile(
-  data: Uint8Array | string,
+/**
+ * Writes bytes straight to `<AppDocsBase>/TurfApp/<relativePath>` — no
+ * native Save dialog. `relativePath` may include subfolders (e.g.
+ * `Receipts/2026-09-04/xxxx.jpg`); any missing parent folders are created
+ * lazily, and only the ones actually needed (no folder tree is pre-created).
+ * Returns the absolute path, mainly so the caller can `revealInFolder` it.
+ */
+export async function saveToAppDocuments(relativePath: string, bytes: Uint8Array): Promise<string> {
+  const { mkdir, writeFile } = await import("@tauri-apps/plugin-fs");
+  const { join, dirname } = await import("@tauri-apps/api/path");
+  const { baseDir, root } = await resolveAppDocsBase();
+  const full = `${APP_DOCS_FOLDER}/${relativePath}`;
+  const dir = await dirname(full);
+  await mkdir(dir, { baseDir, recursive: true });
+  await writeFile(full, bytes, { baseDir });
+  return join(await root(), full);
+}
+
+/** True if `<AppDocsBase>/TurfApp/<relativePath>` already exists. */
+export async function appDocumentExists(relativePath: string): Promise<boolean> {
+  const { exists } = await import("@tauri-apps/plugin-fs");
+  const { baseDir } = await resolveAppDocsBase();
+  return exists(`${APP_DOCS_FOLDER}/${relativePath}`, { baseDir });
+}
+
+/** Absolute path for `<AppDocsBase>/TurfApp/<relativePath>`, for opening/revealing. */
+export async function appDocumentAbsPath(relativePath: string): Promise<string> {
+  const { join } = await import("@tauri-apps/api/path");
+  const { root } = await resolveAppDocsBase();
+  return join(await root(), APP_DOCS_FOLDER, relativePath);
+}
+
+/**
+ * Reads the raw bytes of `<AppDocsBase>/TurfApp/<relativePath>` back out.
+ * Used anywhere the app needs to re-package a file it previously wrote
+ * there (e.g. the receipts-sharing export in `receipts-share.ts`) rather
+ * than just opening it for the person to view.
+ */
+export async function readAppDocument(relativePath: string): Promise<Uint8Array> {
+  const { readFile } = await import("@tauri-apps/plugin-fs");
+  const { baseDir } = await resolveAppDocsBase();
+  return readFile(`${APP_DOCS_FOLDER}/${relativePath}`, { baseDir });
+}
+
+/**
+ * Section subfolders under `Invoices/`, one per part of the app that
+ * produces a saved document — so a person browsing Explorer sees
+ * `Invoices/Turf/…`, `Invoices/Snacks/…`, etc. instead of every bill,
+ * booking, expense export and merged invoice dumped into one flat list.
+ * `saveToInvoicesFolder` accepts any of these (or a plain string, for
+ * forward compatibility) as its optional `section` argument.
+ */
+export const INVOICE_SECTIONS = {
+  turf: "Turf",
+  snacks: "Snacks",
+  bills: "Bills",
+  merged: "Merged",
+  expenses: "Expenses",
+  reports: "Reports",
+} as const;
+
+export type InvoiceSection = (typeof INVOICE_SECTIONS)[keyof typeof INVOICE_SECTIONS];
+
+/**
+ * Writes bytes straight to the app's shared `Invoices/` folder under
+ * `<AppDocsBase>/TurfApp/`. Bill/receipt PDF downloads, print copies, and
+ * Excel exports all call this so they end up in the same top-level folder
+ * instead of wherever the user happened to browse to last time. When
+ * `section` is given, the file lands in that named subfolder (e.g.
+ * `Invoices/Turf/…`) instead of directly under `Invoices/`, so each part
+ * of the app keeps its own documents together. The folder is created
+ * lazily on first write. Returns the absolute path, mainly so the caller
+ * can `revealInFolder` it.
+ */
+export async function saveToInvoicesFolder(
+  bytes: Uint8Array,
   filename: string,
-  mimeType: string,
-  dialogFilter?: { name: string; extensions: string[] },
-  openAfterSave = true,
-): Promise<boolean> {
-  const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  section?: InvoiceSection | (string & {}),
+): Promise<string> {
+  return saveToAppDocuments(`Invoices/${section ? `${section}/` : ""}${filename}`, bytes);
+}
 
-  if (bytes.byteLength === 0) {
-    console.error("saveFile: refusing to save empty file", filename);
-    return false;
+/**
+ * Highlights a just-saved file in Windows Explorer (or the OS's file
+ * manager on other desktop platforms) so the person can see where an
+ * auto-saved PDF/Excel file landed, since there's no Save dialog to close
+ * on top of it anymore. Best-effort — silently no-ops if unsupported,
+ * which is the expected outcome on Android (no Explorer-equivalent to
+ * reveal a file in — `capabilities/mobile.json` doesn't grant this
+ * permission at all, so the underlying plugin call fails immediately and
+ * is swallowed here).
+ */
+export async function revealInFolder(absPath: string): Promise<void> {
+  try {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    await revealItemInDir(absPath);
+  } catch {
+    /* best-effort only */
   }
-
-  if (isMobileShell()) {
-    // 1st choice on Android: the native MediaStore writer (Rust/Kotlin plugin
-    // in src-tauri/plugins/android-save). This is the only supported way to
-    // put a file in the *public* Downloads folder on Android 10+, and it
-    // reports back how many bytes really landed, so a blocked write can no
-    // longer look like a successful download.
-    try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const result = await invoke<{ uri: string; bytesWritten: number }>(
-        "plugin:android-save|save_to_downloads",
-        {
-          payload: {
-            fileName: filename,
-            mimeType,
-            base64: toBase64(bytes),
-            openAfterSave: openAfterSave,
-          },
-        },
-      );
-      if (result && result.bytesWritten > 0) return true;
-      console.error("saveFile: native Downloads write reported 0 bytes", result);
-    } catch (nativeErr) {
-      console.warn("saveFile: native Downloads write unavailable", nativeErr);
-    }
-
-    // Fallback (iOS, or if the native plugin is missing): app-private storage
-    // plus "open with", which the user can then save or share from.
-    try {
-      const { writeFile, BaseDirectory, mkdir } = await import("@tauri-apps/plugin-fs");
-      const { appDataDir } = await import("@tauri-apps/api/path");
-      const folder = "exports";
-      await mkdir(folder, { baseDir: BaseDirectory.AppData, recursive: true }).catch(() => {});
-      const relativePath = `${folder}/${filename}`;
-      await writeFile(relativePath, new Uint8Array(bytes), { baseDir: BaseDirectory.AppData });
-      try {
-        const { openPath } = await import("@tauri-apps/plugin-opener");
-        const base = await appDataDir();
-        const separator = base.endsWith("/") ? "" : "/";
-        await openPath(`${base}${separator}${relativePath}`);
-      } catch (openErr) {
-        console.warn("saveFile: could not open saved file", openErr);
-      }
-      return true;
-    } catch (err) {
-      console.error("saveFile: mobile AppData write failed", err);
-      return false;
-    }
-  }
-
-
-
-  if (isDesktop()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: filename,
-      ...(dialogFilter ? { filters: [dialogFilter] } : {}),
-    });
-    if (!path) return false; // user cancelled
-    await writeFile(path, new Uint8Array(bytes));
-    return true;
-  }
-
-  const blob = new Blob([new Uint8Array(bytes)], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  return true;
 }

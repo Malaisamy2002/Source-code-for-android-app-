@@ -13,7 +13,15 @@
  * twice.
  */
 
-import { balanceOf, billGrossTotal, type Bill } from "./biz";
+import {
+  balanceOf,
+  billGrossTotal,
+  bookingGrossTotal,
+  bookingTaxable,
+  snackSaleGrossTotal,
+  type Bill,
+  type TaxSnapshot,
+} from "./biz";
 import { rupees } from "./money";
 import { TAB_PAYMENT_MODE, type SnackSale, type TurfBooking } from "./ops";
 
@@ -50,6 +58,16 @@ export function netTabAmountFor(
 }
 
 /**
+ * True for a ledger row that is REAL money handed over against a running
+ * tab (a payment recorded from the Dues tab / customer card / final
+ * settlement). Bookkeeping reversals — a merge pulling a source charge off
+ * the tab, an un-merge putting it back — are also stored as `payment` rows
+ * but carry a `ref_type`, and no cash changed hands for them.
+ */
+export const isTabCashPayment = (e: Pick<TabEntry, "kind" | "ref_type">) =>
+  e.kind === "payment" && !e.ref_type;
+
+/**
  * The ONE place that decides whether a turf booking is still its own
  * financial record: not Cancelled, and not merged into a bill (a merged
  * booking's money lives on that bill). Every revenue/dues/advance sum in the
@@ -69,13 +87,76 @@ export const isFinancialBooking = (b: Pick<TurfBooking, "status" | "merged_into_
 export const isFinancialSale = (s: Pick<SnackSale, "merged_into_bill_id">) =>
   !s.merged_into_bill_id;
 
+/** Structural shape `bookingDue` needs — narrower than the full `TurfBooking`
+ * so callers with a partial/projected booking (e.g. `customerLifetimeStats`
+ * in data.ts) can still route through the one shared "what's still owed"
+ * formula instead of re-deriving it by hand. Mirrors the same pattern
+ * `bookingTaxable`/`isFinancialBooking` already use. */
+export type DueBooking = Pick<TurfBooking, "id" | "status" | "advance_paid"> &
+  Partial<Pick<TurfBooking, "merged_into_bill_id">> &
+  Parameters<typeof bookingTaxable>[0] &
+  TaxSnapshot;
+
 /** Money still owed on a turf booking itself (0 once merged / on the tab). */
-export function bookingDue(b: TurfBooking, entries: TabEntry[] = []) {
+export function bookingDue(b: DueBooking, entries: TabEntry[] = []) {
   if (!isFinancialBooking(b)) return 0;
-  const raw = num(b.total_amount) - num(b.advance_paid);
+  // Tax-inclusive, exactly like billDue() via billGrossTotal(): what the
+  // booking's receipt printed as Grand Total, less what was collected.
+  const raw = bookingGrossTotal(b) - num(b.advance_paid);
   const onTab = netTabAmountFor(entries, TAB_REF_TURF_BOOKING, b.id);
   return Math.max(0, round2(raw - onTab));
 }
+
+/**
+ * REAL cash handed over against a booking — never `advance_paid` at face value.
+ *
+ * "Put balance on tab" (TurfTab) settles a booking by writing
+ * `advance_paid = bookingGrossTotal(b)` while posting the remainder as a tab
+ * charge. Reading `advance_paid` as collected money would count that rupee
+ * twice: once here, and again as a tab payment when the customer actually pays
+ * the tab down. Subtracting whatever the tab still owns for this booking
+ * undoes exactly that inflation.
+ *
+ * Every "collected / received / paid" figure for a booking (analytics,
+ * payment split, merges, screens) must go through this.
+ */
+export function bookingCashCollected(
+  b: Pick<TurfBooking, "id" | "advance_paid">,
+  entries: TabEntry[] = [],
+) {
+  const onTab = netTabAmountFor(entries, TAB_REF_TURF_BOOKING, b.id);
+  return Math.max(0, round2(num(b.advance_paid) - onTab));
+}
+
+/**
+ * True when a booking's balance now lives on the customer's running tab: the
+ * booking itself owes nothing, payment happens on the Dues tab, and the row
+ * stays visible but greyed out (mirror of `billMovedToDues`).
+ */
+export function bookingMovedToDues(
+  b: Pick<TurfBooking, "id" | "status" | "merged_into_bill_id">,
+  entries: TabEntry[] = [],
+) {
+  if (b.merged_into_bill_id) return false;
+  return netTabAmountFor(entries, TAB_REF_TURF_BOOKING, b.id) > 0;
+}
+
+/**
+ * True when a snack sale's money sits on the running tab (billed "On tab", or
+ * a charge posted against the sale) rather than collected at the counter.
+ */
+export function saleMovedToDues(
+  s: Pick<SnackSale, "id" | "payment_mode" | "merged_into_bill_id">,
+  entries: TabEntry[] = [],
+) {
+  if (s.merged_into_bill_id) return false;
+  return (
+    (s.payment_mode ?? "") === TAB_PAYMENT_MODE ||
+    netTabAmountFor(entries, TAB_REF_SNACK_SALE, s.id) > 0
+  );
+}
+
+
 
 /**
  * Money still owed on a bill itself.
@@ -92,10 +173,68 @@ export function billDue(bill: Bill, entries: TabEntry[] = []) {
 }
 
 /**
+ * True when a bill's remaining balance has been moved onto the customer's
+ * running tab — the bill itself owes nothing (`billDue` is 0) but money is
+ * still outstanding on the tab. Such bills stay in the Bills list greyed
+ * out; payment happens from the Dues tab.
+ */
+export function billMovedToDues(bill: Bill, entries: TabEntry[] = []) {
+  return balanceOf(bill) > 0 && billDue(bill, entries) === 0;
+}
+
+/**
  * A snack sale never carries a due of its own: it is either paid at the
  * counter or billed "On tab", in which case the tab ledger owns the money.
  */
 export const snackSaleDue = () => 0;
+
+/* ---------- due numbers ---------- */
+
+/** DDMMYY stamp from an ISO date ("2026-09-05" → "050926"). */
+const ddmmyy = (iso: string) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso ?? ""));
+  return m ? `${m[3]}${m[2]}${m[1]!.slice(2)}` : "000000";
+};
+
+/** Earliest date a charge hit the tab for one source record — its "moved to dues" date. */
+export function tabChargeDateFor(
+  entries: TabEntry[],
+  refType: string,
+  refId: string | null | undefined,
+) {
+  if (!refId) return null;
+  let first: string | null = null;
+  for (const e of entries) {
+    if (e.ref_type !== refType || e.ref_id !== refId || e.kind !== "charge") continue;
+    if (!first || e.entry_date < first) first = e.entry_date;
+  }
+  return first;
+}
+
+/**
+ * Due number for a record whose balance moved onto a customer's tab:
+ * `D-<move date DDMMYY>-<original number>`, e.g. `D-050926-INV-0007`.
+ * Derived on display from the ledger + record, never stored, so existing
+ * data needs no migration.
+ */
+export function dueNoFor(originalNo: string, dateISO: string) {
+  return `D-${ddmmyy(dateISO)}-${originalNo}`;
+}
+
+/**
+ * Due number for a source record (bill/booking/sale). Uses the earliest tab
+ * charge against it as the move date, falling back to the record's own date
+ * (e.g. a bill created directly "On tab" never gets a bill-referenced charge).
+ */
+export function dueNoForRef(
+  entries: TabEntry[],
+  refType: string,
+  refId: string | null | undefined,
+  originalNo: string,
+  fallbackDate: string,
+) {
+  return dueNoFor(originalNo, tabChargeDateFor(entries, refType, refId) ?? fallbackDate);
+}
 
 export type DueLine = {
   kind: "tab" | "booking" | "bill";
@@ -202,8 +341,10 @@ export function billCollected(bill: Bill) {
 }
 
 /** Money actually received for a snack sale (an "On tab" sale collects nothing). */
-export function snackSaleCollected(s: Pick<SnackSale, "payment_mode" | "total">) {
-  return s.payment_mode === TAB_PAYMENT_MODE ? 0 : rupees(s.total);
+export function snackSaleCollected(
+  s: Pick<SnackSale, "payment_mode" | "total" | "tax_amount" | "tax_lines">,
+) {
+  return s.payment_mode === TAB_PAYMENT_MODE ? 0 : snackSaleGrossTotal(s);
 }
 
 /** Human label for a snack sale's tab/merge state (used by the Snacks list). */
@@ -231,6 +372,8 @@ export type LedgerGroup = {
   key: string;
   /** Human label naming the source record ("Booking B-12", "Manual due"). */
   label: string;
+  /** Due number (D-<moved date>-<original no>) for record-backed lines. */
+  dueNo: string | null;
   refType: string | null;
   refId: string | null;
   charged: number;
@@ -261,6 +404,13 @@ export function groupTabLedger(
   const bookingNo = new Map((src.bookings ?? []).map((b) => [b.id, b.booking_no]));
   const saleNo = new Map((src.sales ?? []).map((s) => [s.id, s.bill_no]));
 
+  const noFor = (refType: string | null, refId: string | null) => {
+    if (refType === TAB_REF_TURF_BOOKING) return bookingNo.get(refId ?? "") ?? null;
+    if (refType === TAB_REF_SNACK_SALE) return saleNo.get(refId ?? "") ?? null;
+    if (refType === TAB_REF_BILL) return billNo.get(refId ?? "") ?? null;
+    return null;
+  };
+
   const labelFor = (refType: string | null, refId: string | null, note: string | null) => {
     if (refType === TAB_REF_TURF_BOOKING)
       return `Booking ${bookingNo.get(refId ?? "") ?? "(removed)"}`;
@@ -286,6 +436,7 @@ export function groupTabLedger(
           : e.kind === "payment"
             ? "Payments received"
             : "Manual dues",
+      dueNo: null,
       refType,
       refId,
       charged: 0,
@@ -298,6 +449,15 @@ export function groupTabLedger(
     g.net = round2(g.charged - g.paid);
     if (e.entry_date > g.date) g.date = e.entry_date;
     groups.set(key, g);
+  }
+
+  // Stamp record-backed groups with their due number once the full group is
+  // known (the move date is the earliest charge against that source).
+  for (const g of groups.values()) {
+    const originalNo = noFor(g.refType, g.refId);
+    if (originalNo && g.refType && g.refId) {
+      g.dueNo = dueNoForRef(entries, g.refType, g.refId, originalNo, g.date);
+    }
   }
 
   return [...groups.values()].sort((a, b) => b.net - a.net || b.date.localeCompare(a.date));

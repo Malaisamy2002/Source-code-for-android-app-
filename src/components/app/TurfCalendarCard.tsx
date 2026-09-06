@@ -8,6 +8,7 @@ import { cn, localDateStr } from "@/lib/utils";
 import { useTurfBookings, type TurfBooking } from "@/lib/ops";
 import { isFinancialBooking } from "@/lib/analytics";
 import { parseMinutes } from "./TimeSlotPicker";
+import { LayoutPart, LayoutParts } from "./LayoutSection";
 
 const WEEKDAYS = ["S", "M", "T", "W", "T", "F", "S"];
 const iso = localDateStr;
@@ -63,6 +64,8 @@ export function TurfCalendarCard() {
   return (
     <Card>
       <CardContent className="space-y-4">
+        <LayoutParts sectionId="turf.calendar" className="space-y-4">
+        <LayoutPart id="turf.calendar.controls">
         <SectionHeading
           icon={CalendarDays}
           eyebrow="Calendar"
@@ -93,7 +96,9 @@ export function TurfCalendarCard() {
             </div>
           }
         />
+        </LayoutPart>
 
+        <LayoutPart id="turf.calendar.grid" className="space-y-1">
         <div className="grid grid-cols-7 gap-1 text-center text-xs text-muted-foreground">
           {WEEKDAYS.map((d, i) => (
             <span key={i}>{d}</span>
@@ -126,10 +131,15 @@ export function TurfCalendarCard() {
             );
           })}
         </div>
+        </LayoutPart>
 
+        <LayoutPart id="turf.calendar.day-detail">
         <div className="frost-well space-y-2 rounded-xl border p-3">
           <p className="text-sm font-medium">
-            {new Date(selected).toLocaleDateString("en-IN", {
+            {/* `${date}T00:00:00` parses as LOCAL midnight; a bare "YYYY-MM-DD"
+                parses as UTC midnight and reads back as the previous day
+                anywhere west of UTC. */}
+            {new Date(`${selected}T00:00:00`).toLocaleDateString("en-IN", {
               weekday: "short",
               day: "2-digit",
               month: "short",
@@ -162,6 +172,8 @@ export function TurfCalendarCard() {
               ))
           )}
         </div>
+        </LayoutPart>
+        </LayoutParts>
       </CardContent>
     </Card>
   );

@@ -1,5 +1,7 @@
 import ExcelJS from "exceljs";
-import { saveFile } from "./desktop";
+import { toast } from "sonner";
+import { isDesktop, revealInFolder, saveToInvoicesFolder, type InvoiceSection } from "./desktop";
+import { dayKey } from "./analytics";
 
 export type SheetRow = Record<string, string | number>;
 
@@ -22,8 +24,13 @@ export type SheetSpec =
   | { name: string; build: (ws: ExcelJS.Worksheet) => void };
 
 /** Download an array of flat objects as an .xlsx file. */
-export function exportToExcel(rows: SheetRow[], filename: string, sheetName = "Sheet1") {
-  return exportWorkbook([{ name: sheetName, rows }], filename);
+export function exportToExcel(
+  rows: SheetRow[],
+  filename: string,
+  sheetName = "Sheet1",
+  section?: InvoiceSection,
+) {
+  return exportWorkbook([{ name: sheetName, rows }], filename, section);
 }
 
 /**
@@ -34,11 +41,15 @@ export function exportToExcel(rows: SheetRow[], filename: string, sheetName = "S
  * Blob + `<a download>` click ourselves (ExcelJS has no writeFile-style
  * browser helper like SheetJS did). The desktop shell's Tauri WebView can't
  * do that trick either — same reason receipt.ts and backup.ts fork on
- * `isDesktop()` — so there we write the same bytes out via a native Save
- * dialog + `tauri-plugin-fs`, exactly like `downloadReceipt`/`downloadBackup`
- * already do.
+ * `isDesktop()` — so there we write the same bytes straight into the app's
+ * shared `Invoices/` folder via `saveToInvoicesFolder` (desktop.ts) and
+ * reveal the file in Explorer, exactly like `downloadReceipt` does.
  */
-export async function exportWorkbook(sheets: SheetSpec[], filename: string) {
+export async function exportWorkbook(
+  sheets: SheetSpec[],
+  filename: string,
+  section?: InvoiceSection,
+) {
   const wb = new ExcelJS.Workbook();
   for (const s of sheets) {
     const ws = wb.addWorksheet(s.name.slice(0, 31));
@@ -83,12 +94,32 @@ export async function exportWorkbook(sheets: SheetSpec[], filename: string) {
       }
     }
   }
-  const name = `${filename}-${new Date().toISOString().slice(0, 10)}.xlsx`;
-  const buffer = await wb.xlsx.writeBuffer();
-  await saveFile(
-    new Uint8Array(buffer),
-    name,
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    { name: "Excel", extensions: ["xlsx"] },
-  );
+  const name = `${filename}-${dayKey(new Date())}.xlsx`;
+  let buffer: ArrayBuffer;
+  try {
+    buffer = (await wb.xlsx.writeBuffer()) as ArrayBuffer;
+  } catch {
+    toast.error("Excel export failed");
+    return;
+  }
+
+  if (isDesktop()) {
+    const abs = await saveToInvoicesFolder(new Uint8Array(buffer), name, section);
+    await revealInFolder(abs);
+    toast.success("Excel file saved", { description: name });
+    return;
+  }
+
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast.success("Excel file downloaded", { description: name });
 }

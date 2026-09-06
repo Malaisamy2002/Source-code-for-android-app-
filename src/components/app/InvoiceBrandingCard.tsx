@@ -8,6 +8,7 @@ import { Switch } from "@/components/ui/switch";
 import { Card, CardContent } from "@/components/ui/card";
 import { readImageResized } from "@/lib/image";
 import { usePrintSettings, type StoredImage } from "@/lib/print";
+import { SectionHeading } from "./SectionHeading";
 
 function ImageSlot({
   label,
@@ -98,6 +99,7 @@ export function InvoiceBrandingCard() {
 
   return (
     <section className="space-y-3">
+      <SectionHeading eyebrow="BRANDING" title="Invoice generator" icon={ImageIcon} />
       <Card className="frost">
         <CardContent className="space-y-4 p-4">
           <div className="space-y-1">

@@ -14,9 +14,9 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { formatDMY, money, type BillItem } from "@/lib/biz";
+import { formatDMY, money } from "@/lib/biz";
 import { isFinancialBooking, isFinancialSale } from "@/lib/dues";
-import { mergeIntoBill, previewMerge } from "@/lib/merge";
+import { buildMergedItems, mergeIntoBill, previewMerge } from "@/lib/merge";
 import { useSnackSales, useTurfBookings } from "@/lib/ops";
 import { useTabEntries } from "@/lib/tabs";
 import { CustomerFields } from "./CustomerFields";
@@ -60,43 +60,13 @@ export function MergeBillDialog() {
     [openSales, snackIds],
   );
 
-  const items = useMemo<BillItem[]>(() => {
-    const rows: BillItem[] = [];
-    for (const b of pickedBookings) {
-      rows.push({
-        item: `Turf · ${b.slot_name} (${b.booking_no})`,
-        qty: b.hours || 1,
-        rate: b.rate_per_hour || b.turf_amount,
-        total: b.turf_amount || b.total_amount,
-        unit: "hr",
-      });
-      for (const s of b.snacks ?? [])
-        rows.push({
-          item: s.item_name,
-          qty: s.qty,
-          rate: s.unit_price,
-          total: s.amount,
-          unit: "pcs",
-        });
-    }
-    for (const sale of pickedSales)
-      for (const it of sale.items)
-        rows.push({
-          item: it.item_name,
-          qty: it.qty,
-          rate: it.unit_price,
-          total: it.amount,
-          unit: "pcs",
-        });
-    return rows;
-  }, [pickedBookings, pickedSales]);
-
-  // items are built from each booking's raw turf_amount (pre-discount), so
-  // their sum is the GROSS total — any offer already applied to a booking has
-  // to be pulled back in or the merged bill overcharges the customer.
-  const grossTotal = items.reduce((s, i) => s + i.total, 0);
-  const mergedDiscount = pickedBookings.reduce((s, b) => s + (Number(b.discount) || 0), 0);
-  const total = Math.max(0, grossTotal - mergedDiscount);
+  // All the item-building + subtotal/discount/total math lives in
+  // lib/merge.ts and is shared with the actual save (mergeIntoBill), so this
+  // preview can never disagree with what gets written.
+  const { items, subtotal: grossTotal, discount: mergedDiscount, total } = useMemo(
+    () => buildMergedItems(pickedBookings, pickedSales),
+    [pickedBookings, pickedSales],
+  );
 
   const preview = useMemo(
     () =>

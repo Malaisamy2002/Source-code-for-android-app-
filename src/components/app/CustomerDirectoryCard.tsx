@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Search, Trash2, Sparkles } from "lucide-react";
+import { Plus, Search, Trash2, Sparkles, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -16,10 +16,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { customerTag, money, sameCustomerName } from "@/lib/biz";
+import { customerTag, money } from "@/lib/biz";
 import { isFinancialBooking } from "@/lib/analytics";
 import { customerOutstanding, isFinancialSale } from "@/lib/dues";
-import { useBills } from "@/lib/data";
+import { matchesCustomer, useBills } from "@/lib/data";
 import { useSnackSales, useTurfBookings } from "@/lib/ops";
 import {
   useCleanupDuplicateCustomers,
@@ -32,6 +32,7 @@ import { compareBy, useSortState, type SortOption } from "@/lib/sort";
 
 import { CustomerDetailDialog } from "./CustomerDetailDialog";
 import { MergeCustomersDialog } from "./MergeCustomersDialog";
+import { SectionHeading } from "./SectionHeading";
 import { SortMenu } from "./SortMenu";
 
 type CustomerSortField = "name" | "recent" | "due";
@@ -62,23 +63,26 @@ export function CustomerDirectoryCard() {
     name: string;
   } | null>(null);
 
-  /** Visit count per customer = bills + turf bookings + snack sales under their name. */
-  const visitsByName = useMemo(() => {
+  /**
+   * Visit count per saved customer = bills + turf bookings + snack sales.
+   * Keyed by customer id and matched phone-first (`matchesCustomer`), so two
+   * different people who share a name each keep their own visits.
+   */
+  const visitsById = useMemo(() => {
     const map = new Map<string, number>();
     for (const c of customers) {
-      const key = c.name.trim().toLowerCase();
-      if (map.has(key)) continue;
+      const who = { name: c.name, phone: c.phone ?? null };
       const count =
-        bills.filter((b) => sameCustomerName(b.customer_name, c.name)).length +
+        bills.filter((b) => matchesCustomer(who, b.customer_name, b.customer_phone)).length +
         // A merged booking's visit is now represented by the bill it was
         // rolled into (counted above) — counting both double-counts the
         // same visit and can inflate a customer past the VIP threshold.
         // isFinancialBooking() also excludes Cancelled, which is correct
         // here too (a cancelled booking isn't a visit).
-        bookings.filter((b) => sameCustomerName(b.customer_name, c.name) && isFinancialBooking(b))
+        bookings.filter((b) => matchesCustomer(who, b.customer_name, b.phone) && isFinancialBooking(b))
           .length +
-        sales.filter((s) => sameCustomerName(s.customer_name, c.name) && isFinancialSale(s)).length;
-      map.set(key, count);
+        sales.filter((s) => matchesCustomer(who, s.customer_name, null) && isFinancialSale(s)).length;
+      map.set(c.id, count);
     }
     return map;
   }, [customers, bills, bookings, sales]);
@@ -92,36 +96,30 @@ export function CustomerDirectoryCard() {
    * with tab-owned and merged amounts already removed at the source so no
    * rupee is counted twice.
    */
-  const dueByName = useMemo(() => {
+  const dueById = useMemo(() => {
     const map = new Map<string, number>();
     for (const c of customers) {
-      const key = c.name.trim().toLowerCase();
-      if (map.has(key)) continue;
       const phone = c.phone ?? null;
+      const who = { name: c.name, phone };
       map.set(
-        key,
-        customerOutstanding(
-          { name: c.name, phone },
-          {
-            bills,
-            bookings,
-            tabEntries,
-            tabBalance: tabSummaries.get(tabKey(c.name, phone))?.balance ?? 0,
-            match: (n) => sameCustomerName(n, c.name),
-          },
-        ).total,
+        c.id,
+        customerOutstanding(who, {
+          bills,
+          bookings,
+          tabEntries,
+          tabBalance: tabSummaries.get(tabKey(c.name, phone))?.balance ?? 0,
+          match: (n, p) => matchesCustomer(who, n, p),
+        }).total,
       );
     }
     return map;
   }, [customers, bills, bookings, tabEntries, tabSummaries]);
 
   /** Open-tab balance per customer, for the "On tab" badge in the list. */
-  const tabDueByName = useMemo(() => {
+  const tabDueById = useMemo(() => {
     const map = new Map<string, number>();
     for (const c of customers) {
-      const key = c.name.trim().toLowerCase();
-      if (map.has(key)) continue;
-      map.set(key, tabSummaries.get(tabKey(c.name, c.phone ?? null))?.balance ?? 0);
+      map.set(c.id, tabSummaries.get(tabKey(c.name, c.phone ?? null))?.balance ?? 0);
     }
     return map;
   }, [customers, tabSummaries]);
@@ -145,13 +143,13 @@ export function CustomerDirectoryCard() {
     }
     return [...base].sort((a, b) => {
       if (sort.field === "due") {
-        const da = dueByName.get(a.name.trim().toLowerCase()) ?? 0;
-        const db = dueByName.get(b.name.trim().toLowerCase()) ?? 0;
+        const da = dueById.get(a.id) ?? 0;
+        const db = dueById.get(b.id) ?? 0;
         return compareBy(da, db, sort.dir);
       }
       return compareBy(a.name.toLowerCase(), b.name.toLowerCase(), sort.dir);
     });
-  }, [customers, q, sort.field, sort.dir, dueByName]);
+  }, [customers, q, sort.field, sort.dir, dueById]);
 
   const add = () => {
     if (!form.name.trim()) {
@@ -180,15 +178,20 @@ export function CustomerDirectoryCard() {
 
   return (
     <section className="space-y-3">
-      <div className="flex justify-end">
-        <SortMenu
-          options={CUSTOMER_SORT_OPTIONS}
-          field={sort.field}
-          dir={sort.dir}
-          onFieldChange={sort.setField}
-          onToggleDir={sort.toggleDir}
-        />
-      </div>
+      <SectionHeading
+        eyebrow="CUSTOMERS"
+        title="Customer database"
+        icon={Users}
+        action={
+          <SortMenu
+            options={CUSTOMER_SORT_OPTIONS}
+            field={sort.field}
+            dir={sort.dir}
+            onFieldChange={sort.setField}
+            onToggleDir={sort.toggleDir}
+          />
+        }
+      />
       <Card className="frost">
         <CardContent className="space-y-3 p-4">
           <CustomerDetailDialog
@@ -231,6 +234,7 @@ export function CustomerDirectoryCard() {
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search name or phone"
+              data-shortcut="search"
             />
           </div>
 
@@ -241,9 +245,9 @@ export function CustomerDirectoryCard() {
               </p>
             ) : (
               filtered.map((c) => {
-                const visits = visitsByName.get(c.name.trim().toLowerCase()) ?? 0;
-                const due = dueByName.get(c.name.trim().toLowerCase()) ?? 0;
-                const tabDue = tabDueByName.get(c.name.trim().toLowerCase()) ?? 0;
+                const visits = visitsById.get(c.id) ?? 0;
+                const due = dueById.get(c.id) ?? 0;
+                const tabDue = tabDueById.get(c.id) ?? 0;
 
                 const tag = customerTag(visits);
                 return (

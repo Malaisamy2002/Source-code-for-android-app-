@@ -6,6 +6,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { SectionHeading } from "@/components/app/SectionHeading";
 import { NewDueCard } from "@/components/app/NewDueCard";
 import { money, formatDMY } from "@/lib/biz";
@@ -15,6 +22,7 @@ import { useSnackSales, useTurfBookings } from "@/lib/ops";
 import { useAddTabEntry, useSettleAndCloseTab, useTabSummaries, type TabSummary } from "@/lib/tabs";
 import { compareBy, useSortState, type SortOption } from "@/lib/sort";
 import { SortMenu } from "./SortMenu";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 
 type OpenTabSortField = "balance" | "name" | "activity";
 
@@ -39,6 +47,7 @@ function OpenTabRow({
   const addEntry = useAddTabEntry();
   const settle = useSettleAndCloseTab();
   const [amount, setAmount] = useState("");
+  const [payMode, setPayMode] = useState<"Cash" | "UPI">("Cash");
   const [openLedger, setOpenLedger] = useState(false);
   // One line per source record, so the operator can see WHERE the balance came from.
   const groups = useMemo(
@@ -62,7 +71,15 @@ function OpenTabRow({
       return;
     }
     addEntry.mutate(
-      { name, phone, kind: "payment", business: "Shared", amount: value, note: "Payment received" },
+      {
+        name,
+        phone,
+        kind: "payment",
+        business: "Shared",
+        amount: value,
+        note: "Payment received",
+        payment_mode: payMode,
+      },
       {
         onSuccess: () => {
           setAmount("");
@@ -101,6 +118,15 @@ function OpenTabRow({
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
+          <Select value={payMode} onValueChange={(v) => setPayMode(v as "Cash" | "UPI")}>
+            <SelectTrigger className="h-9 w-24" aria-label="Payment mode">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="Cash">Cash</SelectItem>
+              <SelectItem value="UPI">UPI</SelectItem>
+            </SelectContent>
+          </Select>
           <Button size="sm" disabled={addEntry.isPending} onClick={collect}>
             <HandCoins className="mr-1 size-4" /> Collect
           </Button>
@@ -111,9 +137,9 @@ function OpenTabRow({
             onClick={() =>
               tab &&
               settle.mutate(
-                { tabId: tab.id },
+                { tabId: tab.id, payment_mode: payMode },
                 {
-                  onSuccess: () => toast.success("Settled and closed"),
+                  onSuccess: () => toast.success(`Settled via ${payMode} and closed`),
                   onError: (e) => toast.error(e.message),
                 },
               )
@@ -143,6 +169,7 @@ function OpenTabRow({
                   <span className="min-w-0 truncate">
                     {g.label}
                     <span className="text-muted-foreground">
+                      {g.dueNo ? ` · ${g.dueNo}` : ""}
                       {g.date ? ` · ${formatDMY(g.date)}` : ""}
                       {g.paid > 0 && g.charged > 0 ? ` · paid ${money(g.paid)}` : ""}
                     </span>
@@ -213,66 +240,85 @@ export function DuesTab() {
     <div className="space-y-6">
       <SectionHeading eyebrow="BILLS & MONEY" title="Dues" icon={BookOpen} />
 
-      <div className="grid grid-cols-2 gap-2">
-        <div className="frost-well rounded-2xl border p-3.5 text-center">
-          <p className="micro-label whitespace-nowrap">Open tabs</p>
-          <p className="stat-value mt-1 text-lg">{owing.length}</p>
-        </div>
-        <div className="frost-well rounded-2xl border border-primary/30 p-3.5 text-center">
-          <p className="micro-label whitespace-nowrap">Total on tabs</p>
-          <p className="stat-value mt-1 text-lg text-destructive">{money(totalOwed)}</p>
-        </div>
-      </div>
+      <LayoutSections tabId="dues" className="space-y-6">
+        <LayoutSection id="dues.summary">
+          <LayoutParts sectionId="dues.summary" className="grid grid-cols-2 gap-2">
+            <LayoutPart id="dues.summary.count" className="frost-well rounded-2xl border p-3.5 text-center">
+              <p className="micro-label whitespace-nowrap">Open tabs</p>
+              <p className="stat-value mt-1 text-lg">{owing.length}</p>
+            </LayoutPart>
+            <LayoutPart id="dues.summary.total" className="frost-well rounded-2xl border border-primary/30 p-3.5 text-center">
+              <p className="micro-label whitespace-nowrap">Total on tabs</p>
+              <p className="stat-value mt-1 text-lg text-destructive">{money(totalOwed)}</p>
+            </LayoutPart>
+          </LayoutParts>
+        </LayoutSection>
 
-      <section className="space-y-3">
-        <SectionHeading eyebrow="LOG" title="New due" icon={Receipt} />
-        <NewDueCard />
-      </section>
+        <LayoutSection id="dues.new-due">
+          <section className="space-y-3">
+            <SectionHeading eyebrow="LOG" title="New due" icon={Receipt} />
+            <NewDueCard />
+          </section>
+        </LayoutSection>
 
-      <section className="space-y-3">
-        <SectionHeading
-          eyebrow="COLLECT"
-          title="Open tabs"
-          icon={HandCoins}
-          action={
-            <SortMenu
-              options={OPEN_TAB_SORT_OPTIONS}
-              field={openTabSort.field}
-              dir={openTabSort.dir}
-              onFieldChange={openTabSort.setField}
-              onToggleDir={openTabSort.toggleDir}
+        <LayoutSection id="dues.open-tabs">
+          <section className="space-y-3">
+            <LayoutParts sectionId="dues.open-tabs" className="space-y-3">
+            <LayoutPart id="dues.open-tabs.toolbar" className="space-y-3">
+            <SectionHeading
+              eyebrow="COLLECT"
+              title="Open tabs"
+              icon={HandCoins}
+              action={
+                <SortMenu
+                  options={OPEN_TAB_SORT_OPTIONS}
+                  field={openTabSort.field}
+                  dir={openTabSort.dir}
+                  onFieldChange={openTabSort.setField}
+                  onToggleDir={openTabSort.toggleDir}
+                />
+              }
             />
-          }
-        />
-        <Card className="frost">
-          <CardContent className="space-y-3 pt-5">
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="pl-9"
-                placeholder="Search name or phone"
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-              />
-            </div>
-            {openTabs.length === 0 ? (
-              <p className="py-6 text-center text-sm text-muted-foreground">
-                No open tabs. Add a due above to start one.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {openTabs.map((s) => (
-                  <OpenTabRow
-                    key={s.tab?.id ?? s.entries[0]?.customer_key}
-                    summary={s}
-                    sources={sources}
+            <Card className="frost">
+              <CardContent className="pt-5">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    className="pl-9"
+                    placeholder="Search name or phone"
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    data-shortcut="search"
                   />
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </section>
+                </div>
+              </CardContent>
+            </Card>
+            </LayoutPart>
+            <LayoutPart id="dues.open-tabs.list">
+            <Card className="frost">
+              <CardContent className="space-y-3 pt-5">
+                {openTabs.length === 0 ? (
+                  <p className="py-6 text-center text-sm text-muted-foreground">
+                    No open tabs. Add a due above to start one.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {openTabs.map((s) => (
+                      <OpenTabRow
+                        key={s.tab?.id ?? s.entries[0]?.customer_key}
+                        summary={s}
+                        sources={sources}
+                      />
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+            </LayoutPart>
+            </LayoutParts>
+          </section>
+        </LayoutSection>
+      </LayoutSections>
     </div>
   );
 }

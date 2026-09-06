@@ -15,12 +15,14 @@ import {
   NotebookPen,
 } from "lucide-react";
 import { exportToExcel } from "@/lib/xlsx";
+import { INVOICE_SECTIONS } from "@/lib/desktop";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent } from "@/components/ui/card";
 import { SectionHeading } from "@/components/app/SectionHeading";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 import {
   Dialog,
   DialogContent,
@@ -37,14 +39,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatDMY, money } from "@/lib/biz";
-import { bookingDue, bookingStateLabel, isFinancialBooking } from "@/lib/dues";
+import { bookingGrossTotal, formatDMY, money } from "@/lib/biz";
+import {
+  bookingCashCollected,
+  bookingDue,
+  bookingMovedToDues,
+  bookingStateLabel,
+  dueNoForRef,
+  isFinancialBooking,
+  netTabAmountFor,
+} from "@/lib/dues";
 import { Badge } from "@/components/ui/badge";
 import { useBills } from "@/lib/data";
 import { cn, localDateStr } from "@/lib/utils";
 import { useSaveCustomer } from "@/lib/data";
 import { compareBy, sortSuffix, useSortState, type SortOption } from "@/lib/sort";
-import { useAddTabEntry, useTabEntries } from "@/lib/tabs";
+import { TAB_REF_TURF_BOOKING, useAddTabEntry, useTabEntries } from "@/lib/tabs";
 import { CustomerFields } from "./CustomerFields";
 import { SortMenu } from "./SortMenu";
 import {
@@ -69,6 +79,8 @@ import {
   useTurfRates,
   useUpdateTurfBooking,
   rateForInterval,
+  allowedIntervalsFor,
+  useSlotDurations,
   priceForDuration,
 } from "@/lib/ops";
 
@@ -173,11 +185,18 @@ export function TurfTab() {
       const d = new Date(`${date}T00:00:00`);
       if (Number.isNaN(d.getTime())) return null;
       d.setDate(d.getDate() - 1);
-      return d.toISOString().slice(0, 10);
+      // Local calendar day — toISOString() renders UTC, which for IST turned
+      // "one day back" into TWO days back (10 Mar asked for 8 Mar), so a
+      // late-night spill-over from the real previous day was never seen and
+      // could be double-booked.
+      return localDateStr(d);
     };
 
     return (date: string) => {
-      const occupied = new Set<number>();
+      // minute -> number of courts already in use at that minute
+      const occupied = new Map<number, number>();
+      const use = (m: number) => occupied.set(m, (occupied.get(m) ?? 0) + (b_courts ?? 1));
+      let b_courts = 1;
       const yesterday = prevDay(date);
       for (const b of bookings) {
         if (b.status === "Cancelled") continue;
@@ -187,16 +206,21 @@ export function TurfTab() {
         const start = parseMinutes(b.start_time);
         if (start === null) continue;
         const span = Math.max(1, Math.round((b.hours || 1) * 60));
+        b_courts = Math.max(1, Number(b.courts ?? 1));
         for (let m = start; m < start + span; m++) {
           // Same-day booking: only the minutes before midnight land on `date`.
-          if (sameDay && m < 1440) occupied.add(m);
+          if (sameDay && m < 1440) use(m);
           // Previous-day booking: only the minutes past midnight land on `date`.
-          if (dayBefore && m >= 1440) occupied.add(m - 1440);
+          if (dayBefore && m >= 1440) use(m - 1440);
         }
       }
       return occupied;
     };
   }, [bookings]);
+
+  // Slot durations + court count switched on globally in Settings → Turf rates.
+  const { data: slotDurations } = useSlotDurations();
+  const totalCourts = Math.max(1, Number(slotDurations?.total_courts ?? 1));
 
   /**
    * Slot-grid marks (in the currently selected `interval`) that overlap an
@@ -212,9 +236,12 @@ export function TurfTab() {
       const taken: number[] = [];
       for (const part of DAY_PARTS) {
         for (let m = part.from * 60; m < part.to * 60; m += interval) {
+          // A slot is taken only when the courts already in use plus the
+          // courts this booking wants exceed the venue's court count — so a
+          // 2-court turf can hold two 1-court bookings at the same time.
           let overlaps = false;
           for (let k = 0; k < interval; k++) {
-            if (occupied.has(m + k)) {
+            if ((occupied.get(m + k) ?? 0) + courts > totalCourts) {
               overlaps = true;
               break;
             }
@@ -224,7 +251,7 @@ export function TurfTab() {
       }
       return taken;
     };
-  }, [occupiedMinutesOn, interval]);
+  }, [occupiedMinutesOn, interval, courts, totalCourts]);
 
   const bookedSlots = useMemo(() => takenOn(form.booking_date), [takenOn, form.booking_date]);
 
@@ -249,6 +276,18 @@ export function TurfTab() {
 
   const rateRow = activeRates.find((r) => r.slot_name === form.slot_name);
   const rate = rateRow?.rate_per_hour ?? 0;
+
+  const allowedIntervals = useMemo(() => allowedIntervalsFor(slotDurations), [slotDurations]);
+  useEffect(() => {
+    if (allowedIntervals.includes(interval)) return;
+    // Snap to the closest available duration and clear the picked time.
+    const next = allowedIntervals.reduce((best, m) =>
+      Math.abs(m - interval) < Math.abs(best - interval) ? m : best,
+    );
+    setInterval(next);
+    setSelectedSlots([]);
+  }, [allowedIntervals, interval]);
+
   // Price for ONE slot at the chosen duration (uses the slot's own per-duration
   // price when set in Settings, otherwise the prorated hourly rate).
   const bookedMinutes = selectedSlots.length * interval;
@@ -313,7 +352,7 @@ export function TurfTab() {
           case "slot":
             return compareBy(a.slot_name.toLowerCase(), b.slot_name.toLowerCase(), bookingSort.dir);
           case "amount":
-            return compareBy(a.total_amount, b.total_amount, bookingSort.dir);
+            return compareBy(bookingGrossTotal(a), bookingGrossTotal(b), bookingSort.dir);
           case "date":
           default:
             return compareBy(
@@ -434,7 +473,7 @@ export function TurfTab() {
         : "Booking saved",
     );
     if (firstSaved && printSettings.autoPrint)
-      printReceipt(bookingReceipt(firstSaved), printSettings);
+      printReceipt(bookingReceipt(firstSaved), printSettings, INVOICE_SECTIONS.turf);
     saveCustomer.mutate({
       name: form.customer_name.trim(),
       phone: form.phone || null,
@@ -455,15 +494,21 @@ export function TurfTab() {
         icon={Trophy}
       />
 
+      <LayoutSections tabId="turf" className="space-y-6">
+      <LayoutSection id="turf.new-booking">
       <Card className="frost lift border-primary/30">
         <CardContent className="space-y-4">
           <SectionHeading icon={Plus} eyebrow="New" title="New turf booking" />
+          <LayoutParts sectionId="turf.new-booking" className="grid gap-3 md:grid-cols-3">
+          <LayoutPart id="turf.new-booking.customer" className="md:col-span-3">
           <CustomerFields
             name={form.customer_name}
             phone={form.phone}
             onChange={({ name, phone }) => setForm((f) => ({ ...f, customer_name: name, phone }))}
           />
+          </LayoutPart>
 
+          <LayoutPart id="turf.new-booking.slot-picker" className="md:col-span-3">
           <TimeSlotPicker
             date={form.booking_date}
             onDateChange={(d) => {
@@ -475,6 +520,7 @@ export function TurfTab() {
             dayPart={dayPart}
             onDayPartChange={setDayPart}
             interval={interval}
+            allowedIntervals={allowedIntervals}
             onIntervalChange={(m) => {
               setInterval(m);
               setSelectedSlots([]);
@@ -483,9 +529,9 @@ export function TurfTab() {
             onToggleSlot={toggleSlot}
             bookedSlots={bookedSlots}
           />
+          </LayoutPart>
 
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="space-y-1">
+            <LayoutPart id="turf.new-booking.slot-rate" className="space-y-1">
               <Label className="text-xs">Slot rate</Label>
               <Select
                 value={form.slot_name}
@@ -503,12 +549,12 @@ export function TurfTab() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="turf.new-booking.selected-time" className="space-y-1">
               <Label className="text-xs">Selected time (auto)</Label>
               <Input readOnly disabled value={rangeLabel(selectedSlots, interval) || "—"} />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="turf.new-booking.turf-amount" className="space-y-1">
               <Label className="text-xs">Turf amount (auto)</Label>
               <Input readOnly disabled value={money(turfAmount)} />
               {bookedMinutes > 0 && (
@@ -516,11 +562,9 @@ export function TurfTab() {
                   {hoursLabel(hours)} × {courts} court{courts > 1 ? "s" : ""}
                 </p>
               )}
-            </div>
-          </div>
+            </LayoutPart>
 
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="space-y-1">
+            <LayoutPart id="turf.new-booking.extras" className="space-y-1">
               <Label className="text-xs">Discount &amp; notes</Label>
               <Dialog
                 open={extrasOpen}
@@ -546,8 +590,8 @@ export function TurfTab() {
                       snacks total.
                     </DialogDescription>
                   </DialogHeader>
-                  <div className="space-y-3">
-                    <div className="space-y-1">
+                  <LayoutParts surfaceId="surface.booking-extras" className="space-y-3">
+                    <LayoutPart id="surface.booking-extras.discount" className="space-y-1">
                       <Label className="text-xs">Discount amount (₹)</Label>
                       <Input
                         inputMode="decimal"
@@ -559,8 +603,8 @@ export function TurfTab() {
                         Combined total {money(gross)} · after discount{" "}
                         {money(Math.max(0, gross - (Number(draftDiscount) || 0)))}
                       </p>
-                    </div>
-                    <div className="space-y-1">
+                    </LayoutPart>
+                    <LayoutPart id="surface.booking-extras.notes" className="space-y-1">
                       <Label className="text-xs">Notes</Label>
                       <Textarea
                         rows={3}
@@ -568,38 +612,40 @@ export function TurfTab() {
                         onChange={(e) => setDraftNotes(e.target.value)}
                         placeholder="e.g. regular customer, rain reschedule"
                       />
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        setDraftDiscount("");
-                        setDraftNotes("");
-                      }}
-                    >
-                      Clear
-                    </Button>
-                    <Button
-                      onClick={() => {
-                        setDiscount(draftDiscount);
-                        setNotes(draftNotes);
-                        setExtrasOpen(false);
-                        toast.success("Discount & notes applied");
-                      }}
-                    >
-                      Apply
-                    </Button>
-                  </DialogFooter>
+                    </LayoutPart>
+                    <LayoutPart id="surface.booking-extras.actions">
+                      <DialogFooter>
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            setDraftDiscount("");
+                            setDraftNotes("");
+                          }}
+                        >
+                          Clear
+                        </Button>
+                        <Button
+                          onClick={() => {
+                            setDiscount(draftDiscount);
+                            setNotes(draftNotes);
+                            setExtrasOpen(false);
+                            toast.success("Discount & notes applied");
+                          }}
+                        >
+                          Apply
+                        </Button>
+                      </DialogFooter>
+                    </LayoutPart>
+                  </LayoutParts>
                 </DialogContent>
               </Dialog>
-            </div>
+            </LayoutPart>
 
-            <div className="space-y-1">
+            <LayoutPart id="turf.new-booking.grand-total" className="space-y-1">
               <Label className="text-xs">Grand total (auto)</Label>
               <Input readOnly disabled value={money(total)} className="font-semibold" />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="turf.new-booking.advance" className="space-y-1">
               <Label className="text-xs">Advance paid</Label>
               <Input
                 inputMode="decimal"
@@ -607,8 +653,8 @@ export function TurfTab() {
                 onChange={(e) => setForm({ ...form, advance_paid: e.target.value })}
                 placeholder="0"
               />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="turf.new-booking.balance" className="space-y-1">
               <Label className="text-xs">Balance due (auto)</Label>
               <Input
                 readOnly
@@ -616,9 +662,9 @@ export function TurfTab() {
                 value={money(balance)}
                 className={cn(balance > 0 && "!text-destructive font-semibold")}
               />
-            </div>
+            </LayoutPart>
 
-            <div className="space-y-1">
+            <LayoutPart id="turf.new-booking.payment-mode" className="space-y-1">
               <Label className="text-xs">Payment mode</Label>
               <Select
                 value={form.payment_mode}
@@ -635,8 +681,8 @@ export function TurfTab() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="turf.new-booking.status" className="space-y-1">
               <Label className="text-xs">Status</Label>
               <Select value={form.status} onValueChange={(v) => setForm({ ...form, status: v })}>
                 <SelectTrigger>
@@ -650,8 +696,8 @@ export function TurfTab() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="turf.new-booking.repeat" className="space-y-1">
               <Label className="text-xs">Repeat weekly</Label>
               <Select value={String(repeatWeeks)} onValueChange={(v) => setRepeatWeeks(Number(v))}>
                 <SelectTrigger>
@@ -673,21 +719,35 @@ export function TurfTab() {
                   to the first date only
                 </p>
               )}
-            </div>
-          </div>
+            </LayoutPart>
 
-          <Button className="w-full" onClick={submit} disabled={create.isPending}>
+          <LayoutPart id="turf.new-booking.save" className="md:col-span-3">
+          <Button
+            className="w-full"
+            onClick={submit}
+            disabled={create.isPending}
+            data-shortcut="save"
+          >
             <Plus className="mr-1 h-4 w-4" /> Save booking
             {repeatWeeks > 1 ? ` × ${repeatWeeks} weeks` : ""}
           </Button>
+          </LayoutPart>
+          </LayoutParts>
         </CardContent>
       </Card>
+      </LayoutSection>
 
+
+      <LayoutSection id="turf.calendar">
       <TurfCalendarCard />
+      </LayoutSection>
 
       {dues.length > 0 && (
+      <LayoutSection id="turf.pending-dues">
         <Card>
           <CardContent className="space-y-3">
+            <LayoutParts sectionId="turf.pending-dues" className="space-y-3">
+            <LayoutPart id="turf.pending-dues.heading">
             <SectionHeading
               icon={AlertCircle}
               eyebrow="Collections"
@@ -702,6 +762,8 @@ export function TurfTab() {
                 />
               }
             />
+            </LayoutPart>
+            <LayoutPart id="turf.pending-dues.list" className="space-y-3">
             {visibleDues.map((b) => {
               const due = bookingDue(b, tabEntries);
               const entered = Number(collect[b.id] ?? "") || 0;
@@ -723,7 +785,9 @@ export function TurfTab() {
                         update.mutate(
                           {
                             id: b.id,
-                            advance_paid: b.total_amount,
+                            // Tax-inclusive: clearing the due means collecting
+                            // the receipt's grand total, not the pre-tax figure.
+                            advance_paid: bookingGrossTotal(b),
                             status: "Completed",
                           },
                           {
@@ -755,7 +819,7 @@ export function TurfTab() {
                           {
                             id: b.id,
                             advance_paid: paid,
-                            ...(paid >= b.total_amount ? { status: "Completed" } : {}),
+                            ...(paid >= bookingGrossTotal(b) ? { status: "Completed" } : {}),
                           },
                           {
                             onSuccess: () => {
@@ -802,7 +866,9 @@ export function TurfTab() {
                             update.mutate(
                               {
                                 id: b.id,
-                                advance_paid: b.total_amount,
+                                // The tab charge above is the tax-inclusive
+                                // balance, so the booking is settled at gross.
+                                advance_paid: bookingGrossTotal(b),
                                 status: "Completed",
                                 notes: [b.notes, `${money(due)} moved to tab`]
                                   .filter(Boolean)
@@ -835,18 +901,22 @@ export function TurfTab() {
                 Show more ({dues.length - duesVisible} remaining)
               </Button>
             )}
+            </LayoutPart>
+            </LayoutParts>
           </CardContent>
         </Card>
+      </LayoutSection>
       )}
 
+      <LayoutSection id="turf.bookings">
       <Card>
         <CardContent className="space-y-3">
-          <SectionHeading
-            icon={ListChecks}
-            eyebrow="History"
-            title="Bookings"
-            action={
-              <div className="flex items-center gap-2">
+          <LayoutParts sectionId="turf.bookings" className="space-y-3">
+          <LayoutPart id="turf.bookings.heading">
+          <SectionHeading icon={ListChecks} eyebrow="History" title="Bookings" />
+          </LayoutPart>
+          <LayoutPart id="turf.bookings.toolbar">
+            <div className="flex flex-wrap items-center justify-end gap-2">
                 <SortMenu
                   options={BOOKING_SORT_OPTIONS}
                   field={bookingSort.field}
@@ -893,9 +963,9 @@ export function TurfTab() {
                               ? 0
                               : b.turf_amount || b.hours * b.rate_per_hour * (b.courts ?? 1),
                             Discount: merged ? 0 : b.discount,
-                            "Grand total": merged ? 0 : b.total_amount,
+                            "Grand total": merged ? 0 : bookingGrossTotal(b),
                             Advance: merged ? 0 : b.advance_paid,
-                            Balance: merged ? 0 : Math.max(0, b.total_amount - b.advance_paid),
+                            Balance: merged ? 0 : Math.max(0, bookingGrossTotal(b) - b.advance_paid),
                             Notes: b.notes ?? "",
                           },
                         ];
@@ -907,9 +977,9 @@ export function TurfTab() {
                             Qty: it.qty,
                             Amount: merged ? 0 : it.amount,
                             Discount: 0,
-                            "Grand total": merged ? 0 : b.total_amount,
+                            "Grand total": merged ? 0 : bookingGrossTotal(b),
                             Advance: merged ? 0 : b.advance_paid,
-                            Balance: merged ? 0 : Math.max(0, b.total_amount - b.advance_paid),
+                            Balance: merged ? 0 : Math.max(0, bookingGrossTotal(b) - b.advance_paid),
                             Notes: "",
                           });
                         }
@@ -917,26 +987,21 @@ export function TurfTab() {
                       }),
                       `turf-bookings-${sortSuffix(bookingSort.field, bookingSort.dir)}`,
                       "Bookings",
+                      INVOICE_SECTIONS.turf,
                     )
                   }
                 >
                   <FileDown className="h-4 w-4" /> Excel
                 </Button>
-              </div>
-            }
-          />
+            </div>
+          </LayoutPart>
+          <LayoutPart id="turf.bookings.list" className="space-y-3">
           {bookingDate && (
             <div className="frost-soft flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm">
               <span>
                 Showing <span className="font-medium">{dateFilteredBookings.length}</span> booking
                 {dateFilteredBookings.length === 1 ? "" : "s"} for{" "}
-                <span className="font-medium">
-                  {new Date(`${bookingDate}T00:00:00`).toLocaleDateString("en-IN", {
-                    day: "numeric",
-                    month: "short",
-                    year: "numeric",
-                  })}
-                </span>
+                <span className="font-medium">{formatDMY(bookingDate)}</span>
               </span>
               <Button variant="ghost" size="sm" onClick={() => setBookingDate(undefined)}>
                 Clear
@@ -947,28 +1012,49 @@ export function TurfTab() {
             <p className="text-sm text-muted-foreground">No bookings yet.</p>
           )}
           {pageBookings.map((b) => {
-            const due = Math.max(0, b.total_amount - b.advance_paid);
+            // Cash really collected — advance_paid is inflated to the full
+            // gross when a balance is moved to dues (lib/dues.ts).
+            const paid = bookingCashCollected(b, tabEntries);
+            const due = bookingDue(b, tabEntries);
+            const moved = bookingMovedToDues(b, tabEntries);
+            const onDues = netTabAmountFor(tabEntries, TAB_REF_TURF_BOOKING, b.id);
+            const dueNo = moved
+              ? dueNoForRef(
+                  tabEntries,
+                  TAB_REF_TURF_BOOKING,
+                  b.id,
+                  b.booking_no,
+                  b.booking_date,
+                )
+              : null;
             return (
-              <div key={b.id} className="frost-soft lift rounded-xl border p-3 text-sm">
+              <div
+                key={b.id}
+                className={cn(
+                  "frost-soft lift rounded-xl border p-3 text-sm",
+                  moved && "opacity-60 saturate-50",
+                )}
+              >
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="flex flex-wrap items-center gap-2 font-semibold">
                       <span>
                         {b.booking_no} · {b.customer_name}
                       </span>
-                      {(() => {
-                        const state = bookingStateLabel(
-                          b,
-                          tabEntries,
-                          b.merged_into_bill_id ? invoiceNoById.get(b.merged_into_bill_id) : null,
-                        );
-                        return state ? (
-                          <Badge variant={b.merged_into_bill_id ? "outline" : "secondary"}>
-                            {state}
-                          </Badge>
-                        ) : null;
-                      })()}
+                      {moved ? (
+                        <Badge variant="secondary">Moved to dues · {dueNo}</Badge>
+                      ) : (
+                        (() => {
+                          const state = bookingStateLabel(
+                            b,
+                            tabEntries,
+                            b.merged_into_bill_id ? invoiceNoById.get(b.merged_into_bill_id) : null,
+                          );
+                          return state ? <Badge variant="outline">{state}</Badge> : null;
+                        })()
+                      )}
                     </p>
+
                     <p className="text-muted-foreground">
                       {formatDMY(b.booking_date)}
                       {b.start_time && b.end_time ? ` · ${b.start_time}–${b.end_time}` : ""} ·{" "}
@@ -986,7 +1072,7 @@ export function TurfTab() {
                       </ul>
                     )}
                     <p>
-                      Total {money(b.total_amount)}
+                      Total {money(bookingGrossTotal(b))}
                       {b.snacks_total > 0 && (
                         <span className="text-muted-foreground">
                           {" "}
@@ -999,15 +1085,28 @@ export function TurfTab() {
                           · discount {money(b.discount)}
                         </span>
                       )}{" "}
-                      · Paid {money(b.advance_paid)}
+                      · Paid {money(paid)}
                       {due > 0 && <span className="text-destructive"> · Due {money(due)}</span>}
+                      {moved && (
+                        <span className="text-muted-foreground">
+                          {" "}
+                          · {money(onDues)} on dues
+                        </span>
+                      )}
                     </p>
+                    {moved && (
+                      <p className="text-xs text-muted-foreground">
+                        This balance now sits on {b.customer_name}'s dues — collect it from the Dues
+                        tab so the same money isn't counted twice.
+                      </p>
+                    )}
                     {b.merged_into_bill_id && (
                       <p className="text-xs text-muted-foreground">
                         Now billed via the Bills tab — the total above is history only; don't count
                         it again when adding up revenue here.
                       </p>
                     )}
+
                     {b.notes && <p className="mt-1 text-muted-foreground italic">{b.notes}</p>}
                   </div>
                   <div className="flex flex-col items-end gap-2">
@@ -1032,7 +1131,9 @@ export function TurfTab() {
                         variant="outline"
                         aria-label="Print booking receipt"
                         title="Print receipt"
-                        onClick={() => printReceipt(bookingReceipt(b))}
+                        onClick={() =>
+                          printReceipt(bookingReceipt(b), undefined, INVOICE_SECTIONS.turf)
+                        }
                       >
                         <Printer className="h-4 w-4" />
                       </Button>
@@ -1041,7 +1142,9 @@ export function TurfTab() {
                         variant="outline"
                         aria-label="Download booking receipt"
                         title="Download PDF"
-                        onClick={() => downloadReceipt(bookingReceipt(b))}
+                        onClick={() =>
+                          downloadReceipt(bookingReceipt(b), undefined, INVOICE_SECTIONS.turf)
+                        }
                       >
                         <Download className="h-4 w-4" />
                       </Button>
@@ -1086,8 +1189,12 @@ export function TurfTab() {
               </Button>
             </div>
           )}
+          </LayoutPart>
+          </LayoutParts>
         </CardContent>
       </Card>
+      </LayoutSection>
+      </LayoutSections>
     </div>
   );
 }

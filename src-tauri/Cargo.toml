@@ -1,12 +1,13 @@
 [package]
-name = "turf-app"
+name = "turf-ledger"
 version = "0.1.0"
-description = "Turf booking app"
-authors = ["you"]
+description = "Turf Bookings & Sales Ledger desktop app"
 edition = "2021"
+rust-version = "1.77.2"
 
+# See https://tauri.app/v1/guides/getting-started/setup/ for more info
 [lib]
-name = "turf_app_lib"
+name = "turf_ledger_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -15,23 +16,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
-tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
-tauri-plugin-android-save = { path = "plugins/android-save" }
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# Windows Credential Manager backing for the GitHub backup PAT (see
-# keyring_get_token/keyring_set_token/keyring_delete_token in lib.rs).
-# Scoped to Windows only — this project's bundle targets (tauri.conf.json)
-# are nsis/msi only, and Android/iOS go through github.ts's localStorage
-# fallback instead (there's no equivalent one-line OS keystore there).
-[target.'cfg(target_os = "windows")'.dependencies]
-keyring = "2"
 
 [profile.release]
 panic = "abort"
 codegen-units = 1
 lto = true
-incremental = false
 opt-level = "s"
+strip = true

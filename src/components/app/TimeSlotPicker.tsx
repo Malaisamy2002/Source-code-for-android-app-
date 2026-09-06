@@ -90,6 +90,8 @@ type Props = {
   onDayPartChange: (part: DayPartId) => void;
   interval: number;
   onIntervalChange: (mins: number) => void;
+  /** Slot durations available for the selected rate; defaults to all. */
+  allowedIntervals?: readonly number[];
   /** Selected slot start times in minutes-from-midnight. */
   selected: number[];
   onToggleSlot: (mins: number) => void;
@@ -105,6 +107,7 @@ export function TimeSlotPicker({
   onDayPartChange,
   interval,
   onIntervalChange,
+  allowedIntervals,
   selected,
   onToggleSlot,
   bookedSlots,
@@ -231,8 +234,13 @@ export function TimeSlotPicker({
       {/* Slot duration toggle */}
       <div className="space-y-1.5">
         <Label className="micro-label">Slot duration</Label>
-        <div className="grid grid-cols-4 gap-1 rounded-xl bg-muted/70 p-1">
-          {SLOT_INTERVALS.map((m) => (
+        <div
+          className="grid gap-1 rounded-xl bg-muted/70 p-1"
+          style={{
+            gridTemplateColumns: `repeat(${SLOT_INTERVALS.filter((m) => !allowedIntervals || allowedIntervals.includes(m)).length}, minmax(0, 1fr))`,
+          }}
+        >
+          {SLOT_INTERVALS.filter((m) => !allowedIntervals || allowedIntervals.includes(m)).map((m) => (
             <button
               key={m}
               type="button"
@@ -251,7 +259,13 @@ export function TimeSlotPicker({
       </div>
 
       {/* Day-part toggle */}
-      <div className="grid grid-cols-4 gap-1 rounded-xl bg-muted/70 p-1">
+      {/* One column per day-part (5) — a fixed 4-col grid used to wrap
+          "Night" onto a lonely second row. Icon-only labels on very
+          narrow phones so the row still fits. */}
+      <div
+        className="grid gap-1 rounded-xl bg-muted/70 p-1"
+        style={{ gridTemplateColumns: `repeat(${DAY_PARTS.length}, minmax(0, 1fr))` }}
+      >
         {DAY_PARTS.map((p) => {
           const Icon = p.icon;
           const active = p.id === dayPart;
@@ -268,7 +282,8 @@ export function TimeSlotPicker({
               )}
             >
               <Icon className="h-4 w-4" />
-              {p.label}
+              <span className="hidden truncate xs:inline sm:inline">{p.label}</span>
+              <span className="truncate xs:hidden sm:hidden">{p.label.split(" ")[0]}</span>
             </button>
           );
         })}

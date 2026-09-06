@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { formatDMY } from "@/lib/biz";
 import { dateKeyFromDate, type SortDir, type SortOption } from "@/lib/sort";
 
 type SortMenuProps<T extends string> = {
@@ -78,7 +79,7 @@ export function SortMenu<T extends string>({
               variant={selectedDate ? "default" : "outline"}
               className="h-8 w-8 shrink-0"
               aria-label="Pick a date"
-              title={selectedDate ? `Showing ${selectedDate}` : "Pick a date"}
+              title={selectedDate ? `Showing ${formatDMY(selectedDate)}` : "Pick a date"}
             >
               <CalendarIcon className="h-4 w-4" />
             </Button>

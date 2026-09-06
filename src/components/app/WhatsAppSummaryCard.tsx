@@ -7,9 +7,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useBills } from "@/lib/data";
 import { useExpensesV2, useSnackSales, useTurfBookings } from "@/lib/ops";
 import { dayKey, paymentSplit, statsForDay } from "@/lib/analytics";
-import { BUSINESS_NAME, money } from "@/lib/biz";
+import { BUSINESS_NAME, formatDMY, money } from "@/lib/biz";
 import { usePrintSettings } from "@/lib/print";
 import { useAppSettings } from "@/lib/settings";
+import { useTabEntries } from "@/lib/tabs";
 
 export function WhatsAppSummaryCard() {
   const { settings, save } = useAppSettings();
@@ -18,21 +19,19 @@ export function WhatsAppSummaryCard() {
   const { data: bookings = [] } = useTurfBookings();
   const { data: sales = [] } = useSnackSales();
   const { data: expenses = [] } = useExpensesV2();
+  const { data: tabEntries = [] } = useTabEntries();
 
   const send = () => {
     const today = dayKey(new Date());
-    const src = { bills, bookings, sales, expenses };
+    // Same source object (tab ledger included) as the Dashboard's "today".
+    const src = { bills, bookings, sales, expenses, tabEntries };
     const s = statsForDay(src, today);
     const split = paymentSplit(src, (iso) => dayKey(iso) === today);
     const modeText = split
       .filter((m) => m.value > 0)
       .map((m) => `${m.name} ${money(m.value)}`)
       .join(" · ");
-    const dateText = new Date().toLocaleDateString("en-IN", {
-      day: "numeric",
-      month: "short",
-      year: "numeric",
-    });
+    const dateText = formatDMY(today);
 
     const text = [
       `*${printSettings.shopName || BUSINESS_NAME} — Daily summary (${dateText})*`,

@@ -2,7 +2,7 @@ import { Fragment, useMemo } from "react";
 import { Flame } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { SectionHeading } from "@/components/app/SectionHeading";
-import { cn } from "@/lib/utils";
+import { cn, localDateStr } from "@/lib/utils";
 import { DAY_PARTS, parseMinutes } from "./TimeSlotPicker";
 import type { TurfBooking } from "@/lib/ops";
 
@@ -30,7 +30,9 @@ export function TurfUtilizationCard({ bookings }: Props) {
   const { grid, maxAvg, insight, hasData } = useMemo(() => {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - LOOKBACK_DAYS);
-    const cutoffKey = cutoff.toISOString().slice(0, 10);
+    // Local calendar day — toISOString() is UTC and shifted the window start
+    // by a day for IST.
+    const cutoffKey = localDateStr(cutoff);
 
     const inWindow = bookings.filter(
       (b) =>
@@ -49,16 +51,25 @@ export function TurfUtilizationCard({ bookings }: Props) {
       let endMin = parseMinutes(b.end_time);
       if (startMin === null || endMin === null) continue;
       if (endMin <= startMin) endMin += 1440;
-      endMin = Math.min(endMin, 1440);
       const courts = Number(b.courts) || 1;
 
-      for (const part of DAY_PARTS) {
-        const from = part.from * 60;
-        const to = part.to * 60;
-        const overlap = Math.min(endMin, to) - Math.max(startMin, from);
-        if (overlap > 0) {
-          const key = `${weekday}-${part.id}`;
-          totals.set(key, (totals.get(key) ?? 0) + (overlap / 60) * courts);
+      // A booking that runs past midnight is split: minutes before 24:00
+      // stay on this weekday, minutes after land in the NEXT weekday's cells
+      // (its "Late Night" bucket) instead of being dropped.
+      const segments: { weekday: number; from: number; to: number }[] = [
+        { weekday, from: startMin, to: Math.min(endMin, 1440) },
+      ];
+      if (endMin > 1440) segments.push({ weekday: (weekday + 1) % 7, from: 0, to: endMin - 1440 });
+
+      for (const seg of segments) {
+        for (const part of DAY_PARTS) {
+          const from = part.from * 60;
+          const to = part.to * 60;
+          const overlap = Math.min(seg.to, to) - Math.max(seg.from, from);
+          if (overlap > 0) {
+            const key = `${seg.weekday}-${part.id}`;
+            totals.set(key, (totals.get(key) ?? 0) + (overlap / 60) * courts);
+          }
         }
       }
     }

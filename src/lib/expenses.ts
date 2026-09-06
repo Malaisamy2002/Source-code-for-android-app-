@@ -12,7 +12,8 @@ import {
 } from "lucide-react";
 import { db, newId, nextExpenseNo, nowIso, sortBy } from "./localdb";
 import { readCache, writeCache } from "./data";
-import { monthKey as monthKeyCore } from "./analytics";
+import { monthKey as monthKeyCore, dayKey } from "./analytics";
+import { appDocumentAbsPath, appDocumentExists, isDesktop, saveToAppDocuments } from "./desktop";
 
 /** Icon shown next to each expense category. */
 export const CATEGORY_ICONS: Record<string, LucideIcon> = {
@@ -157,6 +158,43 @@ export function useDeleteRecurringExpense() {
 }
 
 /**
+ * Pure plan for one auto-posting run: which rules are due on `now`, and the
+ * plain "YYYY-MM-DD" each post should carry. Extracted from the mutation so
+ * the date rules are unit-testable without a database.
+ *
+ * Date rules:
+ * - Month and day-of-month come from the IST calendar (monthKey/dayKey), NOT
+ *   `now.getDate()` — that reads the runtime's local timezone and disagrees
+ *   with monthKey() anywhere not already set to IST.
+ * - `spent_at` is a plain local date, matching every other expense row. It
+ *   used to be `spent.toISOString()` — a full UTC timestamp that plain-date
+ *   equality filters (ExpensesTab day filter, uploadReceipt folder) silently
+ *   never matched.
+ * - A rule for "the 31st" posts on the LAST day of shorter months (clamped),
+ *   never rolls over into the next month like the Date constructor did.
+ */
+export function planRecurringPosts(
+  rules: RecurringExpense[],
+  now: Date = new Date(),
+): { rule: RecurringExpense; spent_at: string }[] {
+  const month = monthKey(now); // IST month key
+  const todayDay = Number(dayKey(now).slice(8, 10));
+  const [y = 0, mo = 1] = month.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate(); // clamp e.g. the 31st in Feb
+  return rules
+    .filter(
+      (r) =>
+        r.is_active &&
+        r.last_posted_month !== month &&
+        todayDay >= Math.min(r.day_of_month, lastDay),
+    )
+    .map((rule) => ({
+      rule,
+      spent_at: `${month}-${String(Math.min(rule.day_of_month, lastDay)).padStart(2, "0")}`,
+    }));
+}
+
+/**
  * Posts every active recurring expense whose day has arrived this month and
  * which hasn't been posted yet. Returns how many were added.
  */
@@ -166,13 +204,10 @@ export function useRunRecurringExpenses() {
     mutationFn: async (rules: RecurringExpense[]) => {
       const now = new Date();
       const month = monthKey(now);
-      const due = rules.filter(
-        (r) => r.is_active && r.last_posted_month !== month && now.getDate() >= r.day_of_month,
-      );
+      const due = planRecurringPosts(rules, now);
       if (due.length === 0) return 0;
-      for (const r of due) {
+      for (const { rule: r, spent_at } of due) {
         const expense_no = await nextExpenseNo();
-        const spent = new Date(now.getFullYear(), now.getMonth(), r.day_of_month, 12);
         await db.expenses.add({
           id: newId(),
           expense_no,
@@ -181,7 +216,7 @@ export function useRunRecurringExpenses() {
           description: r.title,
           note: "Auto-added recurring expense",
           amount: r.amount,
-          spent_at: spent.toISOString(),
+          spent_at,
           receipt_path: null,
           created_at: nowIso(),
         });
@@ -197,20 +232,71 @@ export function useRunRecurringExpenses() {
   });
 }
 
-/* -------------------------------- receipts ------------------------------- */
+/* -------------------------------- receipts -------------------------------
+ *
+ * Web/PWA build: photos are stored as blobs inside the app's IndexedDB
+ * (`db.receipts`), keyed by a generated path. Fine for a browser sandbox,
+ * but on the desktop build it bloats the app's database file with binary
+ * data the OS can't see or back up on its own.
+ *
+ * Desktop (Tauri) build: photos are instead written as real files on disk,
+ * under `Documents/TurfApp/Receipts/<YYYY-MM-DD>/` — one subfolder per
+ * expense date, right where the person can find it in Explorer (not buried
+ * in the hidden AppData folder). Nothing is created until an expense
+ * actually has a photo attached: no date folder is made in advance, and a
+ * day with no expenses never gets one. `receipt_path` on the expense row
+ * always stores the relative path (`Receipts/2026-09-04/xxxx.jpg`); on
+ * desktop that's resolved against `Documents/TurfApp`, on web it's the
+ * IndexedDB key, so the rest of the app never needs to know which mode it's
+ * in.
+ * ------------------------------------------------------------------------ */
 
-/** Stores a receipt photo as a blob in IndexedDB and returns its local path key. */
-export async function uploadReceipt(file: File) {
+/**
+ * Stores a receipt photo for the given expense date and returns its
+ * relative path (`Receipts/<date>/<id>.<ext>`).
+ *
+ * `date` should be the expense's `spent_at` (YYYY-MM-DD); it's only used to
+ * pick the subfolder name on desktop and is ignored on web.
+ */
+export async function uploadReceipt(file: File, date: string = dayKey(new Date())) {
   const ext = file.name.split(".").pop()?.toLowerCase() || "jpg";
-  const path = `receipts/${newId()}.${ext}`;
+  const path = `Receipts/${date}/${newId()}.${ext}`;
+
+  if (isDesktop()) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await saveToAppDocuments(path, bytes);
+    return path;
+  }
+
   const blob = file.slice(0, file.size, file.type || "image/jpeg");
   await db.receipts.put({ path, blob, created_at: nowIso() });
   return path;
 }
 
-/** Object URL for viewing a stored receipt. Revoke it when done. */
-export async function receiptUrl(path: string) {
+/**
+ * Opens a stored receipt for viewing.
+ *
+ * Desktop: hands the absolute file path to the OS's default photo viewer
+ * (via `tauri-plugin-opener`) — no browser tab/popup involved, so it can't
+ * get silently blocked the way `window.open` can.
+ *
+ * Web: returns a blob Object URL for the caller to `window.open`/render;
+ * revoke it when done.
+ */
+export async function openReceipt(path: string): Promise<string | null> {
+  if (isDesktop()) {
+    const found = await appDocumentExists(path);
+    if (!found) throw new Error("Receipt not found on this device");
+    const abs = await appDocumentAbsPath(path);
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    await openPath(abs);
+    return null; // opened natively — nothing for the caller to display
+  }
+
   const row = await db.receipts.get(path);
   if (!row) throw new Error("Receipt not found on this device");
   return URL.createObjectURL(row.blob);
 }
+
+/** @deprecated use `openReceipt`, which now handles both platforms. */
+export const receiptUrl = openReceipt;

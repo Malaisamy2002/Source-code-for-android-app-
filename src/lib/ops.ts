@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { readCache, writeCache } from "./data";
+import { bookingTaxable, freezeTax } from "./biz";
 import { rowsForYears, useYearWindow, type YearTable } from "./years";
 import {
   db,
@@ -25,6 +26,73 @@ export type TurfRate = {
   rate_60: number | null;
   is_active: boolean;
 };
+
+/** Global on/off switches for which slot durations can be picked on new bookings. */
+export type SlotDurations = {
+  allow_15: boolean;
+  allow_30: boolean;
+  allow_45: boolean;
+  allow_60: boolean;
+  /** How many courts/pitches the venue has. A time slot is only "booked"
+   * once every court is taken, so two 1-court bookings can share a slot on a
+   * 2-court turf. Defaults to 1 (old behaviour: any booking blocks the slot). */
+  total_courts: number;
+};
+
+export const DEFAULT_SLOT_DURATIONS: SlotDurations = {
+  allow_15: true,
+  allow_30: true,
+  allow_45: true,
+  allow_60: true,
+  total_courts: 1,
+};
+
+export const MAX_COURTS = 10;
+export const clampCourts = (n: unknown) =>
+  Math.max(1, Math.min(MAX_COURTS, Math.round(Number(n)) || 1));
+
+/** Slot durations enabled globally. Missing values count as enabled. */
+export const allowedIntervalsFor = (d?: SlotDurations | null): number[] => {
+  const s = d ?? DEFAULT_SLOT_DURATIONS;
+  const list = [
+    [15, s.allow_15],
+    [30, s.allow_30],
+    [45, s.allow_45],
+    [60, s.allow_60],
+  ] as const;
+  const on = list.filter(([, v]) => v !== false).map(([m]) => m as number);
+  return on.length > 0 ? on : [60];
+};
+
+export function useSlotDurations() {
+  return useQuery({
+    queryKey: ["slot_durations"],
+    initialData: () => readCache<SlotDurations>("slot_durations", DEFAULT_SLOT_DURATIONS),
+    queryFn: async () => {
+      const row = await db.app_settings.get("slot_durations");
+      const v = (row?.value ?? {}) as Partial<SlotDurations>;
+      const out: SlotDurations = {
+        allow_15: v.allow_15 !== false,
+        allow_30: v.allow_30 !== false,
+        allow_45: v.allow_45 !== false,
+        allow_60: v.allow_60 !== false,
+        total_courts: clampCourts(v.total_courts ?? 1),
+      };
+      writeCache("slot_durations", out);
+      return out;
+    },
+  });
+}
+
+export function useSaveSlotDurations() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (d: SlotDurations) => {
+      await db.app_settings.put({ key: "slot_durations", value: d, updated_at: nowIso() });
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["slot_durations"] }),
+  });
+}
 
 /** Price for one slot of `interval` minutes. Falls back to the prorated hourly rate. */
 export const rateForInterval = (r: TurfRate, interval: number) => {
@@ -101,6 +169,9 @@ export type TurfBooking = {
   hours: number;
   rate_per_hour: number;
   total_amount: number;
+  /** Tax frozen at creation — see lib/biz.ts TaxSnapshot. */
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
   advance_paid: number;
   payment_mode: string;
   status: string;
@@ -144,6 +215,9 @@ export type SnackSale = {
   customer_name: string | null;
   items: SnackSaleItem[];
   total: number;
+  /** Tax frozen at creation — see lib/biz.ts TaxSnapshot. */
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
   profit: number;
   payment_mode: string;
   notes: string | null;
@@ -384,6 +458,8 @@ export function useTurfBookings() {
         hours: Number(b.hours),
         rate_per_hour: Number(b.rate_per_hour),
         total_amount: Number(b.total_amount),
+        tax_amount: b.tax_amount,
+        tax_lines: b.tax_lines,
         advance_paid: Number(b.advance_paid),
         payment_mode: b.payment_mode,
         status: b.status,
@@ -410,8 +486,20 @@ export function useCreateTurfBooking() {
     mutationFn: async (payload: Omit<TurfBooking, "id" | "booking_no">): Promise<TurfBooking> => {
       const booking_no = await nextTurfBookingNo();
       const id = newId();
-      await db.turf_bookings.add({ ...payload, id, booking_no, created_at: nowIso() });
-      return { ...payload, id, booking_no };
+      // Tax is computed ONCE, from the settings in effect right now, and saved
+      // on the booking — a later GST change can never move this receipt's
+      // grand total, balance due, or the amount its tab charge posts.
+      const tax = freezeTax(bookingTaxable(payload));
+      const row = {
+        ...payload,
+        tax_amount: tax.taxAmount,
+        tax_lines: tax.taxLines,
+        id,
+        booking_no,
+        created_at: nowIso(),
+      };
+      await db.turf_bookings.add(row);
+      return { ...payload, tax_amount: tax.taxAmount, tax_lines: tax.taxLines, id, booking_no };
     },
 
     onSuccess: () => qc.invalidateQueries({ queryKey: ["turf_bookings"] }),
@@ -452,6 +540,8 @@ export function useSnackSales() {
         customer_name: s.customer_name,
         items: (s.items ?? []) as unknown as SnackSaleItem[],
         total: Number(s.total),
+        tax_amount: s.tax_amount,
+        tax_lines: s.tax_lines,
         profit: Number(s.profit),
         payment_mode: s.payment_mode,
         notes: s.notes,
@@ -471,6 +561,8 @@ export function useCreateSnackSale() {
     mutationFn: async (payload: Omit<SnackSale, "id" | "bill_no">): Promise<SnackSale> => {
       const bill_no = await nextSnackBillNo();
       const id = newId();
+      // Same tax freeze as bookings/bills (lib/biz.ts TaxSnapshot).
+      const tax = freezeTax(payload.total);
       await db.snack_sales.add({
         id,
         bill_no,
@@ -478,6 +570,8 @@ export function useCreateSnackSale() {
         customer_name: payload.customer_name,
         items: payload.items,
         total: payload.total,
+        tax_amount: tax.taxAmount,
+        tax_lines: tax.taxLines,
         profit: payload.profit,
         payment_mode: payload.payment_mode,
         notes: payload.notes,
@@ -499,7 +593,7 @@ export function useCreateSnackSale() {
         // ignore stock sync failures
       }
 
-      return { ...payload, id, bill_no };
+      return { ...payload, tax_amount: tax.taxAmount, tax_lines: tax.taxLines, id, bill_no };
     },
 
     onSuccess: () => {

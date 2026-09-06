@@ -438,7 +438,8 @@ const EXPECTED_JUL = {
   snacksRevenue: 300 + 200,
   netRevenue: 1500 + 2000 + 500,
   revenue: 1500 + 2000 + 500 + 1500 * TAX,
-  collected: grossOf(1000) /* INV-1 */ + 0 /* INV-3 */ + (400 + 800) /* advances */ + 500 /* snacks */,
+  collected:
+    grossOf(1000) /* INV-1 */ + 0 /* INV-3 */ + (400 + 800) /* advances */ + 500 /* snacks */,
   expenses: 400,
   profit: 4000 - 400,
   dues: grossOf(500) - 0 /* INV-3 */ + (1200 - 400) + (800 - 800),

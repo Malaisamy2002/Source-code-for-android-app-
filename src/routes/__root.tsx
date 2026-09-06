@@ -14,6 +14,8 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { THEME_INIT_SCRIPT, initTheme } from "@/lib/theme";
 import { registerServiceWorker } from "@/lib/register-sw";
+import { ArrangeModeProvider } from "@/lib/arrange-mode";
+import { ArrangeToolbar } from "@/components/app/ArrangeToolbar";
 
 function NotFoundComponent() {
   return (
@@ -79,13 +81,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
   head: () => ({
     meta: [
       { charSet: "utf-8" },
-      {
-        name: "viewport",
-        content:
-          "width=device-width, initial-scale=1, maximum-scale=5, viewport-fit=cover, interactive-widget=resizes-content",
-      },
-      { name: "mobile-web-app-capable", content: "yes" },
-      { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" },
+      { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Turf Bookings & Sales — Booking, Billing & Reports" },
       {
         name: "description",
@@ -170,9 +166,12 @@ function RootComponent() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
-      <Outlet />
-      <Toaster position="top-center" richColors className="app-toaster" />
+      <ArrangeModeProvider>
+        {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
+        <Outlet />
+        <ArrangeToolbar />
+        <Toaster position="bottom-right" richColors />
+      </ArrangeModeProvider>
     </QueryClientProvider>
   );
 }

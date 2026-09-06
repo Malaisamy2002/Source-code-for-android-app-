@@ -29,6 +29,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDMY, money, whatsappUrl } from "@/lib/biz";
 import { exportToExcel, exportWorkbook } from "@/lib/xlsx";
+import { INVOICE_SECTIONS } from "@/lib/desktop";
 import { buildDashboardSheet } from "@/lib/dashboard-xlsx";
 import {
   downloadReportPdf,
@@ -41,8 +42,13 @@ import { useExpensesV2, useSnackSales, useTurfBookings, useUpdateTurfBooking } f
 import { customerLifetimeStats, useBills, useCustomers } from "@/lib/data";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
+  AGE_BUCKET_META,
+  ageBucket,
+  customerRanking,
+  duesAgeing,
   expenseByCategory,
   isFinancialBooking,
+  itemPerformance,
   lastMonthKeys,
   monthKey,
   monthLabel,
@@ -52,15 +58,24 @@ import {
   profitAndLoss,
   statsForMonth,
   taxReport,
+  turfOccupancy,
   type Sources,
 } from "@/lib/analytics";
 import { activeTaxes, readAppSettings } from "@/lib/settings";
+import { bookingCashCollected, bookingDue } from "@/lib/dues";
+import { useTabEntries } from "@/lib/tabs";
+import { bookingGrossTotal, bookingTaxable } from "@/lib/biz";
+import { rupees } from "@/lib/money";
 import { compareBy, sortSuffix, useSortState, type SortOption } from "@/lib/sort";
 import { DeltaStat } from "./DeltaStat";
 import { HeroStat, MiniStat } from "./HeroStat";
-import { PaymentSplitCard } from "./PaymentSplitCard";
+import { ProfitMixCard } from "./ProfitMixCard";
+import { TopCustomersCard } from "./TopCustomersCard";
+import { TurfUsageDetailCard } from "./TurfUsageDetailCard";
+import { ItemPerformanceCard } from "./ItemPerformanceCard";
 import { SectionHeading } from "./SectionHeading";
 import { SortMenu } from "./SortMenu";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 
 const PIE_COLORS = [
   "var(--chart-1)",
@@ -131,19 +146,24 @@ export function ReportsTab() {
   // just turf bookings + snack sales, which silently excluded any revenue
   // that had been merged into a Bill (see MergeBillDialog) — so "Net profit"
   // on screen could under-report versus the trend chart/export right below it.
+  const { data: tabEntries = [] } = useTabEntries();
+  // The tab ledger rides along so a balance moved onto a customer's running
+  // tab is taken off its source booking/bill here exactly as the Dues tab
+  // does (and tab payments count as collected) — see periodStats().
   const src = useMemo<Sources>(
-    () => ({ bills, bookings, sales, expenses }),
-    [bills, bookings, sales, expenses],
+    () => ({ bills, bookings, sales, expenses, tabEntries }),
+    [bills, bookings, sales, expenses, tabEntries],
   );
   const cur = useMemo(() => statsForMonth(src, month), [src, month]);
 
   const kpis = useMemo(() => {
     // "Outstanding turf dues" is intentionally turf-bookings-only (not bills),
-    // so it's kept as its own calculation rather than cur.dues.
-    const dues = inMonth.b.reduce(
-      (n, x) => n + Math.max(0, (Number(x.total_amount) || 0) - (Number(x.advance_paid) || 0)),
-      0,
-    );
+    // so it's kept as its own calculation rather than cur.dues. Routed
+    // through bookingDue() (dues.ts) — the same tax-inclusive figure the
+    // Turf tab, Dues tab and Dashboard show for the same booking — instead
+    // of a hand-rolled total_amount - advance_paid, which used to silently
+    // drop the tax on a taxed booking (see docs/calculation-rules.md §2/§8).
+    const dues = inMonth.b.reduce((n, x) => n + bookingDue(x, tabEntries), 0);
     return {
       turf: cur.turfRevenue,
       snacks: cur.snacksRevenue,
@@ -152,7 +172,7 @@ export function ReportsTab() {
       dues,
       snackProfit: cur.snackProfit,
     };
-  }, [inMonth, cur]);
+  }, [inMonth, cur, tabEntries]);
 
   const itemRows = useMemo(() => {
     const map = new Map<string, { name: string; qty: number; revenue: number; profit: number }>();
@@ -186,12 +206,27 @@ export function ReportsTab() {
     [itemRows],
   );
 
+  // One canonical "still owed" per booking — bookingDue() (dues.ts):
+  // tax-inclusive via the FROZEN tax on the booking and net of anything
+  // moved to the customer's running tab. The list, its sort, the Excel
+  // "Due" column and the "Mark paid" amount below all read this one number.
   const dues = useMemo(
     () =>
-      bookings.filter(
-        (b) => isFinancialBooking(b) && Number(b.total_amount) - Number(b.advance_paid) > 0,
-      ),
-    [bookings],
+      bookings
+        .filter((b) => bookingDue(b, tabEntries) > 0)
+        .map((b) => ({
+          ...b,
+          gross: bookingGrossTotal(b),
+          // Stored figure — "Mark paid" writes `paid + due` back to
+          // advance_paid, so it must stay the raw stored number.
+          paid: rupees(b.advance_paid),
+          // What the customer actually handed over: `advance_paid` less
+          // anything sitting on their running tab for this booking. Display
+          // only (bookingCashCollected, dues.ts).
+          cashPaid: bookingCashCollected(b, tabEntries),
+          due: bookingDue(b, tabEntries),
+        })),
+    [bookings, tabEntries],
   );
 
   const turfDuesSort = useSortState<TurfDuesSortField>(
@@ -213,14 +248,18 @@ export function ReportsTab() {
             return compareBy(a.booking_date, b.booking_date, turfDuesSort.dir);
           case "due":
           default:
-            return compareBy(
-              Number(a.total_amount) - Number(a.advance_paid),
-              Number(b.total_amount) - Number(b.advance_paid),
-              turfDuesSort.dir,
-            );
+            return compareBy(a.due, b.due, turfDuesSort.dir);
         }
       }),
     [dues, turfDuesSort.field, turfDuesSort.dir],
+  );
+
+  // All outstanding turf dues currently loaded (not just this report month —
+  // an unpaid slot from three months ago is still owed today), grouped by
+  // how overdue it is. Same helper backs the Excel/PDF exports below.
+  const duesByAge = useMemo(
+    () => duesAgeing(bookings, Date.now(), tabEntries),
+    [bookings, tabEntries],
   );
 
   const supporting = [
@@ -247,6 +286,25 @@ export function ReportsTab() {
     () => expenseByCategory(src, (iso) => monthKey(iso) === month),
     [src, month],
   );
+
+  const lifetimeStats = useMemo(
+    () => customerLifetimeStats(customers, { bills, bookings, sales, tabEntries }),
+    [customers, bills, bookings, sales, tabEntries],
+  );
+  const ranking = useMemo(() => customerRanking(lifetimeStats), [lifetimeStats]);
+
+  // Turf usage + item performance both come from lib/analytics so the cards,
+  // the Excel sheets and the PDF statement below can never disagree.
+  const occupancy = useMemo(
+    () => turfOccupancy(bookings, (iso) => monthKey(iso) === month, tabEntries),
+    [bookings, month, tabEntries],
+  );
+  const itemPerf = useMemo(
+    () => itemPerformance(sales, (iso) => monthKey(iso) === month),
+    [sales, month],
+  );
+
+
 
   // Chart data for "Last 6 months": derived from the same `pnl` rows used by
   // the table above (single source of truth), with a profit-margin %
@@ -435,6 +493,96 @@ export function ReportsTab() {
             Profit: r.profit,
           })),
         },
+        {
+          name: "Turf usage",
+          rows: [
+            {
+              Bookings: occupancy.bookingCount,
+              "Booked hours": occupancy.bookedHours,
+              Revenue: occupancy.revenue,
+              "Avg. slot value": occupancy.avgSlotValue,
+              "Avg. slot hours": occupancy.avgSlotHours,
+              "Cancelled slots": occupancy.cancelled.count,
+              "Cancelled amount": occupancy.cancelled.amount,
+              "Unpaid slots": occupancy.unpaid.count,
+              "Unpaid amount": occupancy.unpaid.amount,
+              "Busiest weekday": occupancy.busiestWeekday?.label ?? "",
+              "Busiest hour": occupancy.busiestHour?.label ?? "",
+            },
+          ],
+        },
+        {
+          name: "Turf usage by weekday",
+          rows: occupancy.byWeekday.map((r) => ({
+            Weekday: r.label,
+            Bookings: r.bookings,
+            Hours: r.hours,
+            Revenue: r.revenue,
+            "Share %": Number(r.sharePct.toFixed(1)),
+          })),
+        },
+        {
+          name: "Turf usage by hour",
+          rows: occupancy.byHour.map((r) => ({
+            Hour: r.label,
+            Bookings: r.bookings,
+            Hours: r.hours,
+            Revenue: r.revenue,
+            "Share %": Number(r.sharePct.toFixed(1)),
+          })),
+        },
+        {
+          name: "Best & slow items",
+          rows: [
+            ...itemPerf.topByRevenue.map((r) => ({
+              List: "Top by revenue",
+              Item: r.name,
+              Qty: r.qty,
+              Revenue: r.revenue,
+              Profit: r.profit,
+              "Margin %": Number(r.marginPct.toFixed(1)),
+            })),
+            ...itemPerf.topByProfit.map((r) => ({
+              List: "Top by profit",
+              Item: r.name,
+              Qty: r.qty,
+              Revenue: r.revenue,
+              Profit: r.profit,
+              "Margin %": Number(r.marginPct.toFixed(1)),
+            })),
+            ...itemPerf.slowMovers.map((r) => ({
+              List: "Slow movers",
+              Item: r.name,
+              Qty: r.qty,
+              Revenue: r.revenue,
+              Profit: r.profit,
+              "Margin %": Number(r.marginPct.toFixed(1)),
+            })),
+          ],
+        },
+        {
+          name: "Outstanding dues by age",
+          rows: duesByAge.map((r) => ({
+            "Age bucket": r.label,
+            Count: r.count,
+            Amount: r.amount,
+          })),
+        },
+        {
+          name: "Outstanding dues",
+          autofilter: true,
+          moneyColumns: ["Total", "Paid", "Due"],
+          rows: dues.map((b) => ({
+            "Booking ID": b.booking_no,
+            Date: formatDMY(b.booking_date),
+            Customer: b.customer_name,
+            Phone: b.phone ?? "",
+            Total: b.gross,
+            Paid: b.paid,
+            Due: b.due,
+            "Age bucket": AGE_BUCKET_META[ageBucket(b.booking_date)],
+          })),
+        },
         // Raw record-level sheets — every row currently loaded (the app's
         // active year window, not just the selected report month), so an
         // owner or accountant can filter/pivot on real transactions instead
@@ -442,7 +590,7 @@ export function ReportsTab() {
         {
           name: "Turf bookings",
           autofilter: true,
-          moneyColumns: ["Rate/hr", "Amount", "Advance paid", "Balance due"],
+          moneyColumns: ["Rate/hr", "Amount", "Tax", "Total", "Advance paid", "Balance due"],
           rows: bookings.map((b) => ({
             "Booking ID": b.booking_no,
             Date: formatDMY(b.booking_date),
@@ -455,11 +603,16 @@ export function ReportsTab() {
             // the amount here is zeroed (matching the same convention the
             // Turf tab's own export uses) — otherwise a plain SUM() over
             // this column would double-count that money.
-            Amount: b.merged_into_bill_id ? 0 : b.total_amount,
-            "Advance paid": b.merged_into_bill_id ? 0 : b.advance_paid,
-            "Balance due": b.merged_into_bill_id
-              ? 0
-              : Math.max(0, Number(b.total_amount) - Number(b.advance_paid)),
+            Amount: isFinancialBooking(b) ? rupees(b.total_amount) : 0,
+            // Frozen tax + tax-inclusive total/due — the same figures the
+            // Turf tab, the receipt and the Dashboard show for this booking.
+            Tax: isFinancialBooking(b) ? bookingGrossTotal(b) - bookingTaxable(b) : 0,
+            Total: isFinancialBooking(b) ? bookingGrossTotal(b) : 0,
+            // Real cash taken (bookingCashCollected), not the stored
+            // advance_paid — a balance moved to the customer's tab would
+            // otherwise show here AND again as a dues collection.
+            "Advance paid": isFinancialBooking(b) ? bookingCashCollected(b, tabEntries) : 0,
+            "Balance due": bookingDue(b, tabEntries),
             "Payment mode": b.payment_mode,
             Status: b.status,
             "Merged into bill": b.merged_into_bill_id ? "Yes — see Bills" : "No",
@@ -507,8 +660,12 @@ export function ReportsTab() {
             "Snacks spend",
             "Avg. booking value",
             "Outstanding turf dues",
+            "Outstanding bill dues",
+            "Running tab",
+            "Total owed",
           ],
-          rows: customerLifetimeStats(customers, { bills, bookings, sales })
+          rows: lifetimeStats
+            .slice()
             .sort((a, b) => b.totalSpend - a.totalSpend)
             .map((c) => ({
               Name: c.name,
@@ -520,12 +677,16 @@ export function ReportsTab() {
               "Snacks spend": c.snacksSpend,
               "Avg. booking value": c.avgBookingValue,
               "Outstanding turf dues": c.outstandingTurfDues,
+              "Outstanding bill dues": c.outstandingBillDues,
+              "Running tab": c.outstandingTab,
+              "Total owed": c.outstandingTotal,
               "First visit": c.firstActivity ? formatDMY(c.firstActivity) : "",
               "Last activity": c.lastActivity ? formatDMY(c.lastActivity) : "",
             })),
         },
       ],
       `report-${month}`,
+      INVOICE_SECTIONS.reports,
     );
     toast.success("Report exported");
   };
@@ -577,6 +738,74 @@ export function ReportsTab() {
             cells: [c.name, reportPdfMoney(c.value, s.currencySymbol)],
           })),
         },
+        {
+          title: `Turf usage — ${monthLabel(month)}`,
+          columns: ["Metric", "Value"],
+          rows: [
+            { cells: ["Bookings", String(occupancy.bookingCount)] },
+            { cells: ["Booked hours", occupancy.bookedHours.toFixed(1)] },
+            { cells: ["Avg. slot value", reportPdfMoney(occupancy.avgSlotValue, s.currencySymbol)] },
+            { cells: ["Avg. slot length", `${occupancy.avgSlotHours.toFixed(1)} hrs`] },
+            {
+              cells: [
+                "Cancelled slots",
+                `${occupancy.cancelled.count} · ${reportPdfMoney(occupancy.cancelled.amount, s.currencySymbol)}`,
+              ],
+            },
+            {
+              cells: [
+                "Unpaid slots",
+                `${occupancy.unpaid.count} · ${reportPdfMoney(occupancy.unpaid.amount, s.currencySymbol)}`,
+              ],
+              negative: occupancy.unpaid.count > 0,
+            },
+            { cells: ["Busiest weekday", occupancy.busiestWeekday?.label ?? "—"] },
+            { cells: ["Busiest hour", occupancy.busiestHour?.label ?? "—"] },
+          ],
+        },
+        {
+          title: "Turf usage by weekday",
+          columns: ["Weekday", "Bookings", "Hours", "Revenue"],
+          rows: occupancy.byWeekday
+            .filter((r) => r.hours > 0)
+            .map((r) => ({
+              cells: [
+                r.label,
+                String(r.bookings),
+                r.hours.toFixed(1),
+                reportPdfMoney(r.revenue, s.currencySymbol),
+              ],
+            })),
+        },
+        {
+          title: "Best snacks by revenue",
+          columns: ["Item", "Qty", "Revenue"],
+          rows: itemPerf.topByRevenue.map((r) => ({
+            cells: [r.name, String(r.qty), reportPdfMoney(r.revenue, s.currencySymbol)],
+          })),
+        },
+        {
+          title: "Best snacks by profit",
+          columns: ["Item", "Margin", "Profit"],
+          rows: itemPerf.topByProfit.map((r) => ({
+            cells: [r.name, `${r.marginPct.toFixed(0)}%`, reportPdfMoney(r.profit, s.currencySymbol)],
+          })),
+        },
+        {
+          title: "Slow-moving snacks",
+          columns: ["Item", "Qty", "Revenue"],
+          rows: itemPerf.slowMovers.map((r) => ({
+            cells: [r.name, String(r.qty), reportPdfMoney(r.revenue, s.currencySymbol)],
+          })),
+        },
+        {
+          title: "Outstanding dues by age",
+          columns: ["Age", "Count", "Amount"],
+          rows: duesByAge.map((r) => ({
+            cells: [r.label, String(r.count), reportPdfMoney(r.amount, s.currencySymbol)],
+            negative: r.bucket === "overdue" && r.amount > 0,
+          })),
+        },
         ...(taxRows.length > 0
           ? [
               {
@@ -622,9 +851,13 @@ export function ReportsTab() {
   return (
     <div className="space-y-6">
       <SectionHeading eyebrow="REPORTS" title="Reports" hint={monthLabel(month)} icon={FileText} />
+
+      <LayoutSections tabId="reports" className="space-y-6">
+      <LayoutSection id="reports.month-picker">
       <Card className="frost">
-        <CardContent className="flex flex-wrap items-end gap-3 pt-5">
-          <div>
+        <CardContent className="pt-5">
+          <LayoutParts sectionId="reports.month-picker" className="flex flex-wrap items-end gap-3">
+          <LayoutPart id="reports.month-picker.month">
             <Label className="stat-label text-muted-foreground">Month</Label>
             <Input
               className="h-11"
@@ -632,8 +865,8 @@ export function ReportsTab() {
               value={month}
               onChange={(e) => setMonth(e.target.value || monthKey(new Date()))}
             />
-          </div>
-          <div className="flex flex-wrap gap-1.5 pb-0.5">
+          </LayoutPart>
+          <LayoutPart id="reports.month-picker.quick-months" className="flex flex-wrap gap-1.5 pb-0.5">
             {monthChips.map((c) => (
               <Button
                 key={c.label}
@@ -646,10 +879,13 @@ export function ReportsTab() {
                 {c.label}
               </Button>
             ))}
-          </div>
+          </LayoutPart>
+          </LayoutParts>
         </CardContent>
       </Card>
+      </LayoutSection>
 
+      <LayoutSection id="reports.hero-kpis">
       <div className="grid gap-3 sm:grid-cols-2">
         <HeroStat
           label="Net profit"
@@ -666,13 +902,17 @@ export function ReportsTab() {
           footer={<DeltaStat change={pctChange(cur.revenue, prev.revenue)} />}
         />
       </div>
+      </LayoutSection>
 
+      <LayoutSection id="reports.supporting-kpis">
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
         {supporting.map((c) => (
           <MiniStat key={c.label} label={c.label} value={money(c.value)} />
         ))}
       </div>
+      </LayoutSection>
 
+      <LayoutSection id="reports.insight-kpis">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <MiniStat
           label="Collection rate"
@@ -717,8 +957,12 @@ export function ReportsTab() {
           </CardContent>
         </Card>
       </div>
+      </LayoutSection>
 
+      <LayoutSection id="reports.comparison">
+      <LayoutParts sectionId="reports.comparison">
       <Card className="frost">
+        <LayoutPart id="reports.comparison.toolbar">
         <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-2">
           <CardTitle className="page-title text-base">
             {monthLabel(month)} vs {monthLabel(prevMonthKey(month))}
@@ -735,6 +979,8 @@ export function ReportsTab() {
             </Button>
           </div>
         </CardHeader>
+        </LayoutPart>
+        <LayoutPart id="reports.comparison.tiles">
         <CardContent className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           {compareCards.map((c) => (
             <div key={c.label} className="frost-soft lift rounded-lg border p-3">
@@ -745,8 +991,12 @@ export function ReportsTab() {
             </div>
           ))}
         </CardContent>
+        </LayoutPart>
       </Card>
+      </LayoutParts>
+      </LayoutSection>
 
+      <LayoutSection id="reports.pnl-table">
       <Card className="frost">
         <CardHeader className="pb-2">
           <CardTitle className="page-title text-base">Profit &amp; loss by month</CardTitle>
@@ -784,9 +1034,33 @@ export function ReportsTab() {
           </table>
         </CardContent>
       </Card>
+      </LayoutSection>
 
-      <PaymentSplitCard data={split} subtitle={monthLabel(month)} />
+      <LayoutSection id="reports.profit-mix">
+      <ProfitMixCard
+        turf={cur.turfRevenue}
+        snacks={cur.snacksRevenue}
+        bills={cur.billsRevenue}
+        expenses={cur.expenses}
+        profit={cur.profit}
+        subtitle={monthLabel(month)}
+      />
+      </LayoutSection>
 
+      <LayoutSection id="reports.turf-usage">
+      <TurfUsageDetailCard occupancy={occupancy} />
+      </LayoutSection>
+
+      <LayoutSection id="reports.top-customers">
+      <TopCustomersCard ranking={ranking} />
+      </LayoutSection>
+
+      <LayoutSection id="reports.item-insights">
+      <ItemPerformanceCard performance={itemPerf} />
+      </LayoutSection>
+
+
+      <LayoutSection id="reports.revenue-by-source">
       <Card className="frost">
         <CardHeader className="pb-2">
           <CardTitle className="page-title text-base">Revenue by source · last 6 months</CardTitle>
@@ -847,7 +1121,9 @@ export function ReportsTab() {
           </ResponsiveContainer>
         </CardContent>
       </Card>
+      </LayoutSection>
 
+      <LayoutSection id="reports.expense-trend">
       <Card className="frost">
         <CardHeader className="pb-2">
           <CardTitle className="page-title text-base">Expenses · last 6 months</CardTitle>
@@ -864,7 +1140,9 @@ export function ReportsTab() {
           </ResponsiveContainer>
         </CardContent>
       </Card>
+      </LayoutSection>
 
+      <LayoutSection id="reports.tax">
       {curTaxRow && (
         <Card className="frost">
           <CardHeader className="pb-2">
@@ -898,7 +1176,9 @@ export function ReportsTab() {
           </CardContent>
         </Card>
       )}
+      </LayoutSection>
 
+      <LayoutSection id="reports.snack-share">
       <Card className="frost">
         <CardHeader className="pb-2">
           <CardTitle className="page-title text-base">Snack revenue share</CardTitle>
@@ -920,8 +1200,12 @@ export function ReportsTab() {
           )}
         </CardContent>
       </Card>
+      </LayoutSection>
 
+      <LayoutSection id="reports.item-sales">
+      <LayoutParts sectionId="reports.item-sales">
       <Card className="frost">
+        <LayoutPart id="reports.item-sales.toolbar">
         <CardHeader className="flex-col items-stretch gap-3 space-y-0 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle className="page-title text-base">Item-wise sales</CardTitle>
           <div className="flex flex-wrap gap-2">
@@ -945,6 +1229,7 @@ export function ReportsTab() {
                   })),
                   `items-${month}-${sortSuffix(itemSort.field, itemSort.dir)}`,
                   "Items",
+                  INVOICE_SECTIONS.reports,
                 )
               }
             >
@@ -952,6 +1237,8 @@ export function ReportsTab() {
             </Button>
           </div>
         </CardHeader>
+        </LayoutPart>
+        <LayoutPart id="reports.item-sales.table">
         <CardContent>
           {itemRows.length === 0 ? (
             <p className="text-sm text-muted-foreground">No snack sales this month.</p>
@@ -997,9 +1284,15 @@ export function ReportsTab() {
             </div>
           )}
         </CardContent>
+        </LayoutPart>
       </Card>
+      </LayoutParts>
+      </LayoutSection>
 
+      <LayoutSection id="reports.turf-dues">
+      <LayoutParts sectionId="reports.turf-dues">
       <Card className="frost">
+        <LayoutPart id="reports.turf-dues.toolbar">
         <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-2">
           <CardTitle className="page-title text-base">Turf dues</CardTitle>
           {dues.length > 0 && (
@@ -1012,6 +1305,8 @@ export function ReportsTab() {
             />
           )}
         </CardHeader>
+        </LayoutPart>
+        <LayoutPart id="reports.turf-dues.list">
         <CardContent className="space-y-2">
           {dues.length === 0 ? (
             <p className="text-sm text-muted-foreground">No pending dues.</p>
@@ -1026,12 +1321,13 @@ export function ReportsTab() {
                     {b.booking_no} · {b.customer_name}
                   </p>
                   <p className="text-muted-foreground">
-                    Total {money(b.total_amount)}
+                    Total {money(b.gross)}
                     {b.discount > 0 && <> · Offer -{money(b.discount)}</>} · Paid{" "}
-                    {money(b.advance_paid)}
+                    {money(b.cashPaid)}
                   </p>
                   <p className="font-medium text-destructive">
-                    Due {money(Number(b.total_amount) - Number(b.advance_paid))}
+                    Due {money(b.due)} ·{" "}
+                    {AGE_BUCKET_META[ageBucket(b.booking_date)]}
                   </p>
                 </div>
                 <Button
@@ -1041,7 +1337,9 @@ export function ReportsTab() {
                     updateBooking.mutate(
                       {
                         id: b.id,
-                        advance_paid: b.total_amount,
+                        // Clear the FULL tax-inclusive due (not the pre-tax
+                        // total, which left a tax-sized balance behind).
+                        advance_paid: b.paid + b.due,
                         status: "Completed",
                       },
                       { onSuccess: () => toast.success("Marked as paid") },
@@ -1054,7 +1352,11 @@ export function ReportsTab() {
             ))
           )}
         </CardContent>
+        </LayoutPart>
       </Card>
+      </LayoutParts>
+      </LayoutSection>
+      </LayoutSections>
     </div>
   );
 }

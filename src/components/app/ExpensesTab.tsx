@@ -24,11 +24,12 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { money, shortDate } from "@/lib/biz";
+import { formatDMY, money, shortDate } from "@/lib/biz";
 import { statsForMonth } from "@/lib/analytics";
 import { exportToExcel } from "@/lib/xlsx";
 import { useBills } from "@/lib/data";
 import { cn, localDateStr } from "@/lib/utils";
+import { isDesktop, INVOICE_SECTIONS } from "@/lib/desktop";
 import { compareBy, sortSuffix, useSortState, type SortOption } from "@/lib/sort";
 import {
   BUSINESSES,
@@ -56,6 +57,7 @@ import { useTabEntries } from "@/lib/tabs";
 import { ConfirmDeleteButton } from "./ConfirmDeleteButton";
 import { SectionHeading } from "./SectionHeading";
 import { SortMenu } from "./SortMenu";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 
 const today = () => localDateStr();
 
@@ -237,7 +239,7 @@ export function ExpensesTab() {
     }
     try {
       let receipt_path: string | null = null;
-      if (receipt) receipt_path = await uploadReceipt(receipt);
+      if (receipt) receipt_path = await uploadReceipt(receipt, form.spent_at);
       await addExpense.mutateAsync({ ...form, amount, receipt_path });
       setForm({ ...form, description: "", amount: "", note: "" });
       setReceipt(null);
@@ -249,9 +251,31 @@ export function ExpensesTab() {
   };
 
   const openReceipt = async (path: string) => {
+    if (isDesktop()) {
+      // Desktop: receiptUrl() hands the file straight to the OS's default
+      // photo viewer and returns null — no browser tab involved at all.
+      try {
+        await receiptUrl(path);
+      } catch (e) {
+        toast.error((e as Error).message);
+      }
+      return;
+    }
+    // Web: open the tab synchronously (still inside the click's user-gesture
+    // window) so browsers don't treat it as a blocked popup. We fill in
+    // the actual blob URL once the async IndexedDB lookup resolves.
+    const win = window.open("", "_blank", "noopener");
     try {
-      window.open(await receiptUrl(path), "_blank", "noopener");
+      const url = await receiptUrl(path);
+      if (win && url) {
+        win.location.href = url;
+      } else if (!win) {
+        // Popup blocked outright (e.g. browser setting) — nothing to fall
+        // back to since we don't have a tab to redirect.
+        toast.error("Your browser blocked the popup. Allow popups for this site to view receipts.");
+      }
     } catch (e) {
+      win?.close();
       toast.error((e as Error).message);
     }
   };
@@ -301,34 +325,41 @@ export function ExpensesTab() {
       })),
       `expenses-${sortSuffix(expenseSort.field, expenseSort.dir)}`,
       "Expenses",
+      INVOICE_SECTIONS.expenses,
     );
 
   return (
     <div className="space-y-6">
       <SectionHeading eyebrow="BILLS & MONEY" title="Expenses" icon={Wallet} />
 
+      <LayoutSections tabId="money" className="space-y-6">
+      <LayoutSection id="money.month-summary">
       <section className="space-y-3">
         <SectionHeading eyebrow="THIS MONTH" title="Money in vs money out" />
-        <div className="grid grid-cols-3 gap-2">
-          <div className="frost-well rounded-2xl border p-3.5 text-center">
+        <LayoutParts sectionId="money.month-summary" className="grid grid-cols-3 gap-2">
+          <LayoutPart id="money.month-summary.in" className="frost-well rounded-2xl border p-3.5 text-center">
             <p className="micro-label whitespace-nowrap">Income</p>
             <p className="stat-value mt-1 text-lg text-success">{money(monthStats.revenue)}</p>
-          </div>
-          <div className="frost-well rounded-2xl border p-3.5 text-center">
+          </LayoutPart>
+          <LayoutPart id="money.month-summary.out" className="frost-well rounded-2xl border p-3.5 text-center">
             <p className="micro-label whitespace-nowrap">Expenses</p>
             <p className="stat-value mt-1 text-lg text-destructive">{money(monthStats.expenses)}</p>
-          </div>
-          <div className="frost-well rounded-2xl border border-primary/30 p-3.5 text-center">
+          </LayoutPart>
+          <LayoutPart id="money.month-summary.net" className="frost-well rounded-2xl border border-primary/30 p-3.5 text-center">
             <p className="micro-label whitespace-nowrap">Net profit</p>
             <p className="stat-value mt-1 text-lg text-primary">{money(monthStats.profit)}</p>
-          </div>
-        </div>
+          </LayoutPart>
+        </LayoutParts>
       </section>
+      </LayoutSection>
 
+      <LayoutSection id="money.budget">
       <section className="space-y-3">
         <SectionHeading eyebrow="BUDGET" title="Monthly budget" icon={PiggyBank} />
         <Card className="frost">
           <CardContent className="space-y-3 pt-5">
+            <LayoutParts sectionId="money.budget" className="space-y-3">
+            <LayoutPart id="money.budget.amount">
             <div className="flex items-end gap-2">
               <div className="flex-1 space-y-1">
                 <Label className="text-xs">Budget for {month}</Label>
@@ -343,6 +374,8 @@ export function ExpensesTab() {
                 Save
               </Button>
             </div>
+            </LayoutPart>
+            <LayoutPart id="money.budget.progress" className="space-y-3">
             <Progress value={budgetPct} />
             <div className="flex justify-between text-xs">
               <span className="text-muted-foreground">
@@ -358,23 +391,28 @@ export function ExpensesTab() {
                     : "No budget set"}
               </span>
             </div>
+            </LayoutPart>
+            </LayoutParts>
           </CardContent>
         </Card>
       </section>
+      </LayoutSection>
 
+      <LayoutSection id="money.add-expense">
       <section className="space-y-3">
         <SectionHeading eyebrow="LOG" title="Add expense" icon={Plus} />
         <Card className="frost">
-          <CardContent className="grid gap-3 pt-5 md:grid-cols-3">
-            <div className="space-y-1">
+          <CardContent className="pt-5">
+            <LayoutParts sectionId="money.add-expense" className="grid gap-3 md:grid-cols-3">
+            <LayoutPart id="money.add-expense.date" className="space-y-1">
               <Label className="text-xs">Date</Label>
               <Input
                 type="date"
                 value={form.spent_at}
                 onChange={(e) => setForm({ ...form, spent_at: e.target.value })}
               />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.business" className="space-y-1">
               <Label className="text-xs">Business</Label>
               <Select
                 value={form.business}
@@ -391,8 +429,8 @@ export function ExpensesTab() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.category" className="space-y-1">
               <Label className="text-xs">Category</Label>
               <Select
                 value={form.category}
@@ -415,16 +453,16 @@ export function ExpensesTab() {
                   })}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1 md:col-span-2">
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.description" className="space-y-1 md:col-span-2">
               <Label className="text-xs">Description</Label>
               <Input
                 value={form.description}
                 onChange={(e) => setForm({ ...form, description: e.target.value })}
                 placeholder="What was it for?"
               />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.amount" className="space-y-1">
               <Label className="text-xs">Amount</Label>
               <Input
                 inputMode="decimal"
@@ -432,16 +470,16 @@ export function ExpensesTab() {
                 onChange={(e) => setForm({ ...form, amount: e.target.value })}
                 placeholder="0"
               />
-            </div>
-            <div className="space-y-1 md:col-span-2">
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.notes" className="space-y-1 md:col-span-2">
               <Label className="text-xs">Notes</Label>
               <Input
                 value={form.note}
                 onChange={(e) => setForm({ ...form, note: e.target.value })}
                 placeholder="Optional"
               />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.receipt" className="space-y-1">
               <Label className="text-xs">Receipt photo</Label>
               <input
                 ref={fileRef}
@@ -459,15 +497,27 @@ export function ExpensesTab() {
                 <Paperclip className="mr-1 size-4" />
                 {receipt ? receipt.name.slice(0, 18) : "Attach photo"}
               </Button>
-            </div>
-            <Button className="lift" onClick={submit} disabled={addExpense.isPending}>
+            </LayoutPart>
+            <LayoutPart id="money.add-expense.save">
+            <Button
+              className="lift w-full"
+              onClick={submit}
+              disabled={addExpense.isPending}
+              data-shortcut="save"
+            >
               <Plus className="mr-1 size-4" /> Add expense
             </Button>
+            </LayoutPart>
+            </LayoutParts>
           </CardContent>
         </Card>
       </section>
+      </LayoutSection>
 
+      <LayoutSection id="money.recurring">
       <section className="space-y-3">
+        <LayoutParts sectionId="money.recurring" className="space-y-3">
+        <LayoutPart id="money.recurring.heading">
         <SectionHeading
           eyebrow="AUTOMATION"
           title="Recurring expenses"
@@ -484,6 +534,8 @@ export function ExpensesTab() {
             ) : undefined
           }
         />
+        </LayoutPart>
+        <LayoutPart id="money.recurring.form">
         <Card className="frost">
           <CardContent className="space-y-4 pt-5">
             <div className="grid gap-3 md:grid-cols-3">
@@ -552,7 +604,12 @@ export function ExpensesTab() {
                 <Plus className="mr-1 size-4" /> Save recurring
               </Button>
             </div>
-
+          </CardContent>
+        </Card>
+        </LayoutPart>
+        <LayoutPart id="money.recurring.list">
+        <Card className="frost">
+          <CardContent className="space-y-4 pt-5">
             {recurring.length === 0 ? (
               <p className="py-2 text-center text-sm text-muted-foreground">
                 Nothing recurring yet. Rent and salaries get added automatically each month.
@@ -617,10 +674,16 @@ export function ExpensesTab() {
             )}
           </CardContent>
         </Card>
+        </LayoutPart>
+        </LayoutParts>
       </section>
+      </LayoutSection>
 
+      <LayoutSection id="money.by-category">
       {byCategory.length > 0 && (
         <section className="space-y-3">
+          <LayoutParts sectionId="money.by-category" className="space-y-3">
+          <LayoutPart id="money.by-category.heading">
           <SectionHeading
             eyebrow="BREAKDOWN"
             title="By category"
@@ -635,6 +698,8 @@ export function ExpensesTab() {
               />
             }
           />
+          </LayoutPart>
+          <LayoutPart id="money.by-category.chart">
           <Card className="frost">
             <CardContent className="pt-5">
               <ul className="space-y-3 text-sm">
@@ -662,10 +727,16 @@ export function ExpensesTab() {
               </ul>
             </CardContent>
           </Card>
+          </LayoutPart>
+          </LayoutParts>
         </section>
       )}
+      </LayoutSection>
 
+      <LayoutSection id="money.recent">
       <section className="space-y-3">
+        <LayoutParts sectionId="money.recent" className="space-y-3">
+        <LayoutPart id="money.recent.toolbar">
         <SectionHeading
           eyebrow="LEDGER"
           title="Recent expenses"
@@ -693,20 +764,16 @@ export function ExpensesTab() {
             </div>
           }
         />
+        </LayoutPart>
+        <LayoutPart id="money.recent.list">
         <Card className="frost">
           <CardContent className="pt-5">
             {expenseDate && (
               <div className="frost-soft mb-3 flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm">
                 <span>
-                  Showing <span className="font-medium">{dateFilteredExpenses.length}</span>{" "}
-                  expense{dateFilteredExpenses.length === 1 ? "" : "s"} for{" "}
-                  <span className="font-medium">
-                    {new Date(`${expenseDate}T00:00:00`).toLocaleDateString("en-IN", {
-                      day: "numeric",
-                      month: "short",
-                      year: "numeric",
-                    })}
-                  </span>
+                  Showing <span className="font-medium">{dateFilteredExpenses.length}</span> expense
+                  {dateFilteredExpenses.length === 1 ? "" : "s"} for{" "}
+                  <span className="font-medium">{formatDMY(expenseDate)}</span>
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => setExpenseDate(undefined)}>
                   Clear
@@ -771,7 +838,11 @@ export function ExpensesTab() {
             )}
           </CardContent>
         </Card>
+        </LayoutPart>
+        </LayoutParts>
       </section>
+      </LayoutSection>
+      </LayoutSections>
     </div>
   );
 }

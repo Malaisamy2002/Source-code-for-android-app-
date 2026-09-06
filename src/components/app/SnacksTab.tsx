@@ -1,6 +1,16 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Minus, Trash2, ReceiptText, Repeat, Cookie, ShoppingBasket } from "lucide-react";
+import {
+  Plus,
+  Minus,
+  Trash2,
+  ReceiptText,
+  Repeat,
+  Cookie,
+  ShoppingBasket,
+  Check,
+  ChevronsUpDown,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,12 +24,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatDMY, money } from "@/lib/biz";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { cn } from "@/lib/utils";
+import { bookingGrossTotal, formatDMY, money, snackSaleGrossTotal } from "@/lib/biz";
 import { isFinancialBooking } from "@/lib/analytics";
 import { usePrintSettings } from "@/lib/print";
 import { snackSaleReceipt, printReceipt } from "@/lib/receipt";
+import { INVOICE_SECTIONS } from "@/lib/desktop";
 import { CustomerFields } from "./CustomerFields";
 import { SnackSalesList } from "./SnackSalesList";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 
 import {
   SNACK_PAYMENT_MODES,
@@ -65,11 +87,14 @@ export function SnacksTab() {
   const [qty, setQty] = useState("1");
   const [cart, setCart] = useState<SnackSaleItem[]>([]);
   const [bookingId, setBookingId] = useState<string>("none");
+  /** Controls the searchable item picker's open/closed state. */
+  const [itemPickerOpen, setItemPickerOpen] = useState(false);
   /** Free-typed text for a cart row's qty box while it's being edited, keyed by
    * item+price so the field can be cleared and retyped without the row
    * disappearing mid-keystroke (a blank/zero value only commits on blur/Enter). */
   const [qtyDrafts, setQtyDrafts] = useState<Record<string, string>>({});
   const cartRowKey = (r: SnackSaleItem) => `${r.item_name}__${r.unit_price}`;
+  const qtyInputRef = useRef<HTMLInputElement>(null);
 
   const picked = activeSnacks.find((i) => i.item_name === itemName);
   const lineAmount = (Number(qty) || 0) * (picked?.unit_price ?? 0);
@@ -159,6 +184,13 @@ export function SnacksTab() {
       }),
     );
     setQty("1");
+    // Snacks shortcut: keep focus (and the text selected) in Qty after
+    // adding, so pressing Enter repeatedly adds line after line without
+    // ever reaching for the mouse.
+    requestAnimationFrame(() => {
+      qtyInputRef.current?.focus();
+      qtyInputRef.current?.select();
+    });
   };
 
   /** Commits a typed cart-row qty on blur/Enter — clears the draft and either
@@ -192,18 +224,23 @@ export function SnacksTab() {
       toast.error("Add at least one snack");
       return;
     }
-    if (phone && !/^\d{10}$/.test(phone)) {
+    // Customer name and phone are compulsory on every snack bill. A linked
+    // turf booking that already carries them satisfies the requirement.
+    const billName = customer.trim() || linkedBooking?.customer_name || "";
+    const billPhone = phone.trim() || linkedBooking?.phone || "";
+    if (!billName) {
+      toast.error("Enter customer name to generate the bill");
+      return;
+    }
+    if (!billPhone) {
+      toast.error("Enter phone number to generate the bill");
+      return;
+    }
+    if (!/^\d{10}$/.test(billPhone)) {
       toast.error("Phone must be 10 digits");
       return;
     }
-    const billName = customer.trim() || linkedBooking?.customer_name || "";
-    const billPhone = phone.trim() || linkedBooking?.phone || null;
-    // "On tab" only works against a named customer — the tab is that person's ledger.
     const onTab = paymentMode === TAB_PAYMENT_MODE;
-    if (onTab && !billName) {
-      toast.error("Enter a customer name to put this bill on a tab");
-      return;
-    }
     create.mutate(
       {
         sale_date: saleDate,
@@ -219,7 +256,8 @@ export function SnacksTab() {
       {
         onSuccess: (saved) => {
           toast.success(`Bill ${saved.bill_no} created`);
-          if (printSettings.autoPrint) printReceipt(snackSaleReceipt(saved), printSettings);
+          if (printSettings.autoPrint)
+            printReceipt(snackSaleReceipt(saved), printSettings, INVOICE_SECTIONS.snacks);
           // Push the bill total onto the customer's running tab as a Snacks charge,
           // linked back to the sale so the ledger row can be traced to the bill.
           if (onTab) {
@@ -229,14 +267,17 @@ export function SnacksTab() {
                 phone: billPhone,
                 kind: "charge",
                 business: "Snacks",
-                amount: saved.total,
+                // The tab is charged the same tax-inclusive grand total the
+                // receipt just printed (lib/biz.ts snackSaleGrossTotal).
+                amount: snackSaleGrossTotal(saved),
                 note: `Snack bill ${saved.bill_no}`,
                 ref_type: "snack_sale",
                 ref_id: saved.id,
                 entry_date: saved.sale_date,
               },
               {
-                onSuccess: () => toast.success(`₹${saved.total} added to ${billName}'s tab`),
+                onSuccess: () =>
+                  toast.success(`${money(snackSaleGrossTotal(saved))} added to ${billName}'s tab`),
                 onError: (e) => toast.error(e.message),
               },
             );
@@ -262,10 +303,14 @@ export function SnacksTab() {
         icon={Cookie}
       />
 
+      <LayoutSections tabId="snacks" className="space-y-6">
+      <LayoutSection id="snacks.new-bill">
       {/* Generate bill — kept at the very top of the page */}
       <Card className="frost lift border-primary/30">
         <CardContent className="space-y-4">
           <SectionHeading icon={ReceiptText} eyebrow="New" title="Generate snack bill" />
+          <LayoutParts sectionId="snacks.new-bill" className="space-y-4">
+          <LayoutPart id="snacks.new-bill.customer">
           <CustomerFields
             name={customer}
             phone={phone}
@@ -273,9 +318,11 @@ export function SnacksTab() {
               setCustomer(name);
               setPhone(p);
             }}
-            nameLabel="Customer name (optional)"
+            nameLabel="Customer name"
           />
+          </LayoutPart>
 
+          <LayoutPart id="snacks.new-bill.frequent">
           {frequentItems.length > 0 && (
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Usually orders</Label>
@@ -295,13 +342,14 @@ export function SnacksTab() {
               </div>
             </div>
           )}
+          </LayoutPart>
 
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="space-y-1">
+          <LayoutParts sectionId="snacks.new-bill" className="grid gap-3 md:grid-cols-3">
+            <LayoutPart id="snacks.new-bill.date" className="space-y-1">
               <Label className="text-xs">Date</Label>
               <Input type="date" value={saleDate} onChange={(e) => setSaleDate(e.target.value)} />
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="snacks.new-bill.payment-mode" className="space-y-1">
               <Label className="text-xs">Payment mode</Label>
               <Select value={paymentMode} onValueChange={setPaymentMode}>
                 <SelectTrigger>
@@ -315,14 +363,14 @@ export function SnacksTab() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-1">
+            </LayoutPart>
+            <LayoutPart id="snacks.new-bill.total" className="space-y-1">
               <Label className="text-xs">Total (auto)</Label>
               <Input readOnly disabled value={money(total)} className="font-semibold" />
-            </div>
-          </div>
+            </LayoutPart>
+          </LayoutParts>
 
-          <div className="space-y-1">
+          <LayoutPart id="snacks.new-bill.link-booking" className="space-y-1">
             <Label className="text-xs">Link to turf booking (optional)</Label>
             <Select value={bookingId} onValueChange={setBookingId}>
               <SelectTrigger>
@@ -340,15 +388,16 @@ export function SnacksTab() {
             </Select>
             {linkedBooking && (
               <p className="text-xs text-muted-foreground">
-                Combined bill: turf {money(linkedBooking.total_amount)} + snacks {money(total)} ={" "}
+                Combined bill: turf {money(bookingGrossTotal(linkedBooking))} + snacks{" "}
+                {money(total)} ={" "}
                 <span className="font-medium text-foreground">
-                  {money(linkedBooking.total_amount + total)}
+                  {money(bookingGrossTotal(linkedBooking) + total)}
                 </span>
               </p>
             )}
-          </div>
+          </LayoutPart>
 
-          <div className="space-y-1">
+          <LayoutPart id="snacks.new-bill.notes" className="space-y-1">
             <Label className="text-xs">Notes</Label>
             <Textarea
               rows={2}
@@ -356,17 +405,30 @@ export function SnacksTab() {
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Optional note for this bill"
             />
-          </div>
+          </LayoutPart>
 
-          <Button className="h-12 w-full" onClick={generateBill} disabled={create.isPending}>
+          <LayoutPart id="snacks.new-bill.save">
+          <Button
+            className="h-12 w-full"
+            onClick={generateBill}
+            disabled={create.isPending}
+            data-shortcut="save"
+          >
             <ReceiptText className="mr-1 h-5 w-5" /> Generate bill · {money(total)}
           </Button>
+          </LayoutPart>
+          </LayoutParts>
         </CardContent>
       </Card>
+      </LayoutSection>
 
+
+      <LayoutSection id="snacks.catalogue">
       <Card>
         <CardContent className="space-y-3">
           <SectionHeading icon={ShoppingBasket} eyebrow="Catalogue" title="Add snacks" />
+          <LayoutParts sectionId="snacks.catalogue" className="space-y-3">
+          <LayoutPart id="snacks.catalogue.combos">
           {activeCombos.length > 0 && (
             <div className="frost-soft space-y-2 rounded-xl border border-primary/30 p-3">
               <p className="micro-label">Combo deals — one tap</p>
@@ -379,33 +441,86 @@ export function SnacksTab() {
               </div>
             </div>
           )}
+          </LayoutPart>
 
+          <LayoutPart id="snacks.catalogue.picker" className="space-y-3">
           <div className="grid items-end gap-3 md:grid-cols-4">
             <div className="space-y-1 md:col-span-2">
               <Label className="text-xs">Item</Label>
-              <Select value={itemName} onValueChange={setItemName}>
-                <SelectTrigger>
-                  <SelectValue
-                    placeholder={activeSnacks.length ? "Select item" : "Add items in Settings"}
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {activeSnacks.map((i) => (
-                    <SelectItem key={i.id} value={i.item_name}>
-                      {i.item_name} — {money(i.unit_price)} · {i.stock_quantity} left
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Popover open={itemPickerOpen} onOpenChange={setItemPickerOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={itemPickerOpen}
+                    className="w-full justify-between font-normal"
+                    disabled={activeSnacks.length === 0}
+                  >
+                    <span className="truncate">
+                      {picked
+                        ? `${picked.item_name} — ${money(picked.unit_price)} · ${picked.stock_quantity} left`
+                        : activeSnacks.length
+                          ? "Select item"
+                          : "Add items in Settings"}
+                    </span>
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command
+                    filter={(value, search) =>
+                      value.toLowerCase().includes(search.toLowerCase()) ? 1 : 0
+                    }
+                  >
+                    <CommandInput placeholder="Search snacks…" />
+                    <CommandList>
+                      <CommandEmpty>No snack found.</CommandEmpty>
+                      <CommandGroup>
+                        {activeSnacks.map((i) => (
+                          <CommandItem
+                            key={i.id}
+                            value={i.item_name}
+                            onSelect={(value) => {
+                              setItemName(value === itemName ? "" : value);
+                              setItemPickerOpen(false);
+                              requestAnimationFrame(() => {
+                                qtyInputRef.current?.focus();
+                                qtyInputRef.current?.select();
+                              });
+                            }}
+                          >
+                            <Check
+                              className={cn(
+                                "mr-2 h-4 w-4",
+                                itemName === i.item_name ? "opacity-100" : "opacity-0",
+                              )}
+                            />
+                            <span className="flex-1 truncate">
+                              {i.item_name} — {money(i.unit_price)} · {i.stock_quantity} left
+                            </span>
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
             <div className="space-y-1">
               <Label className="text-xs">Qty</Label>
               <Input
+                ref={qtyInputRef}
                 type="number"
                 min={0}
                 step={1}
                 value={qty}
                 onChange={(e) => setQty(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    addLine();
+                  }
+                }}
               />
             </div>
             <div className="space-y-1">
@@ -416,7 +531,17 @@ export function SnacksTab() {
           <Button variant="outline" className="w-full" onClick={addLine}>
             <Plus className="mr-1 h-4 w-4" /> Add item
           </Button>
+          </LayoutPart>
 
+          <LayoutPart id="snacks.catalogue.tip">
+          <p className="text-center text-[11px] text-muted-foreground">
+            Tip: pick an item, type the qty, then press{" "}
+            <kbd className="rounded border bg-muted px-1.5 py-0.5 font-mono">Enter</kbd> to add it
+            instantly and keep going.
+          </p>
+          </LayoutPart>
+
+          <LayoutPart id="snacks.catalogue.cart">
           {cart.length > 0 && (
             <div className="frost-well space-y-2 rounded-xl border p-3">
               {cart.map((r, idx) => {
@@ -479,14 +604,24 @@ export function SnacksTab() {
               </div>
             </div>
           )}
+          </LayoutPart>
+          </LayoutParts>
         </CardContent>
       </Card>
+      </LayoutSection>
 
+      <LayoutSection id="snacks.stock">
       <SnackStockCard />
+      </LayoutSection>
 
+      <LayoutSection id="snacks.popular">
       <PopularSnacksCard />
+      </LayoutSection>
 
+      <LayoutSection id="snacks.sales">
       <SnackSalesList />
+      </LayoutSection>
+      </LayoutSections>
     </div>
   );
 }

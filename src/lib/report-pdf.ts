@@ -1,7 +1,27 @@
 import { jsPDF } from "jspdf";
-import { isDesktop, isMobileShell, openExternal, saveFile } from "./desktop";
+import {
+  isDesktop,
+  openExternal,
+  revealInFolder,
+  saveToInvoicesFolder,
+  INVOICE_SECTIONS,
+  type InvoiceSection,
+} from "./desktop";
 import { rupees } from "./money";
 import { readPrintSettings, type PrintSettings } from "./print";
+
+/** Shrinks `text` (with the CURRENT font/size already applied) down to fit
+ * `maxW` mm by dropping trailing characters and adding "…", instead of
+ * letting it run into a neighbouring column — same approach receipt.ts uses
+ * for its item table. Must be called only after pdf.setFont/setFontSize for
+ * this text, since getTextWidth measures against whatever font is active. */
+const fitToWidth = (pdf: jsPDF, text: string, maxW: number) => {
+  const safeMaxW = Math.max(4, maxW);
+  if (pdf.getTextWidth(text) <= safeMaxW) return text;
+  let t = text;
+  while (t.length > 1 && pdf.getTextWidth(`${t}…`) > safeMaxW) t = t.slice(0, -1);
+  return `${t}…`;
+};
 
 /** PDF-safe money: helvetica has no ₹ glyph (same reasoning as receipt.ts's
  * own `pmoney`), so amounts print as "Rs 12,345" instead. */
@@ -110,7 +130,10 @@ export function buildReportPdf(doc: ReportPdfDoc, s: PrintSettings = readPrintSe
     table.columns.forEach((c, i) => {
       const a = align[i]!;
       const x = a === "right" ? colX[i]! + colW[i]! : colX[i]!;
-      pdf.text(c, x, y, { align: a });
+      // Clamp to this column's own width (minus a small gap) so a long
+      // header — or, below, a long cell value — can't run into the next
+      // column instead of stopping at its own boundary.
+      pdf.text(fitToWidth(pdf, c, colW[i]! - 2), x, y, { align: a });
     });
     y += 2;
     pdf.setDrawColor(225);
@@ -125,7 +148,7 @@ export function buildReportPdf(doc: ReportPdfDoc, s: PrintSettings = readPrintSe
       row.cells.forEach((cell, i) => {
         const a = align[i]!;
         const x = a === "right" ? colX[i]! + colW[i]! : colX[i]!;
-        pdf.text(cell, x, y, { align: a });
+        pdf.text(fitToWidth(pdf, cell, colW[i]! - 2), x, y, { align: a });
       });
       y += 5.2;
     }
@@ -144,38 +167,35 @@ export function buildReportPdf(doc: ReportPdfDoc, s: PrintSettings = readPrintSe
   return pdf;
 }
 
-/** Saves the report PDF — same desktop-save-dialog-vs-browser-download split
- * as `downloadReceipt` in receipt.ts (including the mobile share-sheet
- * route inside `saveFile`, which avoids Android's dialog+fs 0-byte bug). */
+/** Saves the report PDF — desktop writes straight into the shared
+ * `Invoices/` folder (no Save dialog), same as `downloadReceipt` in
+ * receipt.ts; browser/PWA keeps jsPDF's own Blob download. */
 export async function downloadReportPdf(
   doc: ReportPdfDoc,
   s: PrintSettings = readPrintSettings(),
+  section: InvoiceSection | (string & {}) = INVOICE_SECTIONS.reports,
 ): Promise<void> {
   const pdf = buildReportPdf(doc, s);
   if (isDesktop()) {
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
-    await saveFile(new Uint8Array(bytes), `${doc.fileName}.pdf`, "application/pdf", {
-      name: "PDF",
-      extensions: ["pdf"],
-    });
+    const abs = await saveToInvoicesFolder(new Uint8Array(bytes), `${doc.fileName}.pdf`, section);
+    await revealInFolder(abs);
     return;
   }
   pdf.save(`${doc.fileName}.pdf`);
 }
 
 /** Shares the report PDF via WhatsApp where possible, falling back to a
- * plain download — mirrors `shareReceipt`'s desktop/mobile/browser split.
- * `isMobileShell()` keeps Android/iOS out of the desktop-only branch below,
- * since their WebView does support `navigator.share` even though
- * `isDesktop()` is also true there (same Tauri global as real desktop). */
+ * plain download — mirrors `shareReceipt`'s desktop/mobile/browser split. */
 export async function shareReportPdf(
   doc: ReportPdfDoc,
   fallbackUrl: string,
   s: PrintSettings = readPrintSettings(),
+  section: InvoiceSection | (string & {}) = INVOICE_SECTIONS.reports,
 ): Promise<"shared" | "fallback" | "cancelled"> {
   const pdf = buildReportPdf(doc, s);
-  if (isDesktop() && !isMobileShell()) {
-    await downloadReportPdf(doc, s);
+  if (isDesktop()) {
+    await downloadReportPdf(doc, s, section);
     await openExternal(fallbackUrl);
     return "fallback";
   }
@@ -193,7 +213,7 @@ export async function shareReportPdf(
       return "cancelled";
     }
   }
-  await downloadReportPdf(doc, s);
+  await downloadReportPdf(doc, s, section);
   await openExternal(fallbackUrl);
   return "fallback";
 }

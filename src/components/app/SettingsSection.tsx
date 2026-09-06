@@ -1,82 +1,62 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { cn } from "@/lib/utils";
 
-const KEY_PREFIX = "ks:settings-open:";
-
 /**
- * Collapsible wrapper for one settings block. The trigger doubles as the
- * section heading so a long settings page reads as a short list of dropdowns.
- * Open/closed state is remembered per section on this device.
+ * One collapsible block inside the Settings accordion — a tap-to-expand
+ * dropdown per section (Appearance, Pricing, Backup, …) instead of one long
+ * scroll. `action` (e.g. a sort menu) renders next to the chevron, outside
+ * the trigger's own click target, so tapping it doesn't also toggle the
+ * section open/closed.
  */
 export function SettingsSection({
-  id,
+  value,
   eyebrow,
   title,
   hint,
   icon: Icon,
-  defaultOpen = false,
+  action,
   children,
+  className,
 }: {
-  id: string;
+  /** Unique key for this section — also what's saved to remember which
+   * sections were left open across a refresh. */
+  value: string;
   eyebrow?: string;
   title: string;
   hint?: string;
   icon?: LucideIcon;
-  defaultOpen?: boolean;
-  children: ReactNode;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
-
-  // Read the saved state after mount so server and client render the same markup.
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(KEY_PREFIX + id);
-      if (saved != null) setOpen(saved === "1");
-    } catch {
-      /* storage unavailable — keep the default */
-    }
-  }, [id]);
-
-  const change = (v: boolean) => {
-    setOpen(v);
-    try {
-      localStorage.setItem(KEY_PREFIX + id, v ? "1" : "0");
-    } catch {
-      /* ignore */
-    }
-  };
-
   return (
-    <Collapsible open={open} onOpenChange={change} className="space-y-3">
-      <CollapsibleTrigger
-        className={cn(
-          "frost lift flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition-colors",
-          "hover:bg-accent/40",
-        )}
-      >
-        {Icon ? (
-          <span className="frost-soft grid size-9 shrink-0 place-items-center rounded-xl border">
-            <Icon className="size-4 text-primary" />
-          </span>
+    <AccordionItem
+      value={value}
+      className={cn("frost overflow-hidden rounded-2xl border px-4", className)}
+    >
+      <div className="flex items-center gap-2">
+        <AccordionTrigger className="flex-1 py-4 hover:no-underline">
+          <div className="flex min-w-0 items-center gap-3">
+            {Icon ? (
+              <span className="frost-soft grid size-9 shrink-0 place-items-center rounded-xl border">
+                <Icon className="size-4 text-primary" />
+              </span>
+            ) : null}
+            <div className="min-w-0">
+              {eyebrow ? <p className="micro-label truncate">{eyebrow}</p> : null}
+              <h2 className="page-title truncate">{title}</h2>
+              {hint ? <p className="truncate text-xs text-muted-foreground">{hint}</p> : null}
+            </div>
+          </div>
+        </AccordionTrigger>
+        {action ? (
+          <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
+            {action}
+          </div>
         ) : null}
-        <span className="min-w-0 flex-1">
-          {eyebrow ? <span className="micro-label block truncate">{eyebrow}</span> : null}
-          <span className="page-title block truncate">{title}</span>
-          {hint ? (
-            <span className="block truncate text-xs text-muted-foreground">{hint}</span>
-          ) : null}
-        </span>
-        <ChevronDown
-          className={cn(
-            "size-5 shrink-0 text-muted-foreground transition-transform duration-200",
-            open && "rotate-180",
-          )}
-        />
-      </CollapsibleTrigger>
-      <CollapsibleContent className="space-y-3">{children}</CollapsibleContent>
-    </Collapsible>
+      </div>
+      <AccordionContent className="pt-1">{children}</AccordionContent>
+    </AccordionItem>
   );
 }

@@ -34,12 +34,14 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useBills, useUpdateBill } from "@/lib/data";
 import { useTurfBookings, useUpdateTurfBooking, useSnackSales, useExpensesV2 } from "@/lib/ops";
-import { formatDMY, money, whatsappUrl } from "@/lib/biz";
+import { billGrossTotal, billPaidAmount, bookingGrossTotal, formatDMY, money, whatsappUrl } from "@/lib/biz";
+import { billDue, bookingDue } from "@/lib/dues";
+import { useTabEntries } from "@/lib/tabs";
 import { openExternal } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 import {
   readAppSettings,
-  taxBreakdown,
   writeAppSettings,
   monthlyReportDueKey,
 } from "@/lib/settings";
@@ -53,7 +55,6 @@ import { readPrintSettings } from "@/lib/print";
 import {
   dayKey,
   expenseByCategory,
-  isFinancialBooking,
   lastMonthKeys,
   monthKey,
   monthLabel,
@@ -68,7 +69,7 @@ import {
 import { compareBy, useSortState, type SortOption } from "@/lib/sort";
 import { DeltaStat } from "./DeltaStat";
 import { HeroStat, MiniStat } from "./HeroStat";
-import { PaymentSplitCard } from "./PaymentSplitCard";
+import { DuesFocusCard } from "./DuesFocusCard";
 import { SectionHeading } from "./SectionHeading";
 import { SortMenu } from "./SortMenu";
 import { TurfUtilizationCard } from "./TurfUtilizationCard";
@@ -143,11 +144,15 @@ export function DashboardTab() {
   const updateBill = useUpdateBill();
   const updateBooking = useUpdateTurfBooking();
 
+  const { data: tabEntries = [] } = useTabEntries();
+
+  // The tab ledger MUST ride along: a balance moved onto a customer's running
+  // tab is owed on the Dues tab, and periodStats() needs the ledger to take it
+  // off the source booking/bill (and to count tab payments as collected).
   const src = useMemo<Sources>(
-    () => ({ bills, bookings, sales: snackSales, expenses }),
-    [bills, bookings, snackSales, expenses],
+    () => ({ bills, bookings, sales: snackSales, expenses, tabEntries }),
+    [bills, bookings, snackSales, expenses, tabEntries],
   );
-  const appSettings = useMemo(() => readAppSettings(), []);
 
   const thisMonth = monthKey(new Date());
   const today = dayKey(new Date());
@@ -157,15 +162,11 @@ export function DashboardTab() {
   const prev = useMemo(() => statsForMonth(src, prevMonthKey(thisMonth)), [src, thisMonth]);
 
   const totals = useMemo(() => {
-    const billsDue = bills
-      .filter((b) => b.status !== "paid")
-      .reduce((s, b) => {
-        const { taxAmount } = taxBreakdown(b.total, appSettings);
-        return s + Math.max(0, b.total + taxAmount - b.amount_paid);
-      }, 0);
-    const turfDue = bookings
-      .filter(isFinancialBooking)
-      .reduce((s, b) => s + Math.max(0, b.total_amount - b.advance_paid), 0);
+    // One canonical "still owed" figure — billDue()/bookingDue() from
+    // dues.ts: frozen tax included, anything moved to the running tab
+    // excluded — the same rupee the Bills/Turf/Dues tabs show.
+    const billsDue = bills.reduce((s, b) => s + billDue(b, tabEntries), 0);
+    const turfDue = bookings.reduce((s, b) => s + bookingDue(b, tabEntries), 0);
     return {
       totalDue: billsDue + turfDue,
       // Event count, not money — a merged booking still happened today as
@@ -175,7 +176,7 @@ export function DashboardTab() {
         .length,
       snackSalesToday: snackSales.filter((s) => isToday(s.sale_date)).length,
     };
-  }, [bills, bookings, snackSales, appSettings]);
+  }, [bills, bookings, snackSales, tabEntries]);
 
   // Cash reconciliation: what should be sitting in the drawer right now.
   // Expenses have no payment-mode field of their own, so — like the rest of
@@ -211,10 +212,17 @@ export function DashboardTab() {
 
   const trend = useMemo(() => profitAndLoss(src, lastMonthKeys(thisMonth, 6)), [src, thisMonth]);
 
-  const split = useMemo(
-    () => paymentSplit(src, (iso) => monthKey(iso) === thisMonth),
-    [src, thisMonth],
-  );
+  // Cash vs online collected today — the only part of the retired payment-mode
+  // pie that still earns its space, now as two plain figures.
+  const collectedTodayByMode = useMemo(() => {
+    const rows = paymentSplit(src, (iso) => dayKey(iso) === today);
+    const cash = rows.find((p) => p.name === "Cash")?.value ?? 0;
+    const online = rows
+      .filter((p) => p.name === "UPI" || p.name === "Card")
+      .reduce((n, p) => n + p.value, 0);
+    return { cash, online };
+  }, [src, today]);
+
 
   // "Monthly summary on the 1st": checked here on every app open rather than
   // via a real scheduler (see monthlyReportDueKey's own note on why).
@@ -317,45 +325,43 @@ export function DashboardTab() {
   });
 
   const dueList = useMemo<DueRow[]>(() => {
+    // Same canonical due as the hero figure above (billDue/bookingDue):
+    // tax-inclusive via the FROZEN tax on each record, and net of anything
+    // already moved to the customer's running tab.
     const billRows: DueRow[] = bills
-      .filter((b) => b.status !== "paid")
-      .map((b) => {
-        const { taxAmount } = taxBreakdown(b.total, appSettings);
-        const gross = b.total + taxAmount;
-        return {
-          key: `bill-${b.id}`,
-          kind: "bill" as const,
-          id: b.id,
-          label: b.customer_name,
-          sub: `Invoice ${b.invoice_no}`,
-          date: b.bill_date,
-          due: Math.max(0, gross - b.amount_paid),
-          total: gross,
-          paid: b.amount_paid,
-          phone: b.customer_phone,
-        };
-      })
+      .map((b) => ({
+        key: `bill-${b.id}`,
+        kind: "bill" as const,
+        id: b.id,
+        label: b.customer_name,
+        sub: `Invoice ${b.invoice_no}`,
+        date: b.bill_date,
+        due: billDue(b, tabEntries),
+        total: billGrossTotal(b),
+        paid: billPaidAmount(b),
+        phone: b.customer_phone,
+      }))
       .filter((r) => r.due > 0);
     const turfRows: DueRow[] = bookings
-      .filter((b) => isFinancialBooking(b) && b.total_amount - b.advance_paid > 0)
       .map((b) => ({
         key: `turf-${b.id}`,
-        kind: "turf",
+        kind: "turf" as const,
         id: b.id,
         label: b.customer_name,
         sub: `Turf ${b.booking_no} · ${b.slot_name}`,
         date: b.booking_date,
-        due: Math.max(0, b.total_amount - b.advance_paid),
-        total: b.total_amount,
-        paid: b.advance_paid,
+        due: bookingDue(b, tabEntries),
+        total: bookingGrossTotal(b),
+        paid: rupees(b.advance_paid),
         phone: b.phone,
-      }));
+      }))
+      .filter((r) => r.due > 0);
     return [...billRows, ...turfRows].sort((a, b) =>
       dueSort.field === "amount"
         ? compareBy(a.due, b.due, dueSort.dir)
         : compareBy(new Date(a.date).getTime(), new Date(b.date).getTime(), dueSort.dir),
     );
-  }, [bills, bookings, appSettings, dueSort.field, dueSort.dir]);
+  }, [bills, bookings, tabEntries, dueSort.field, dueSort.dir]);
 
   const [dueVisible, setDueVisible] = useState(25);
   const visibleDueList = useMemo(() => dueList.slice(0, dueVisible), [dueList, dueVisible]);
@@ -426,6 +432,44 @@ export function DashboardTab() {
     }));
   }, [visibleDueList]);
 
+  // Ageing summary over the FULL due list (not just the visible page), so the
+  // "Money owed to me" card never under-reports when the list is truncated.
+  const dueBuckets = useMemo(() => {
+    const totals = new Map<AgeBucket, { total: number; count: number }>();
+    for (const row of dueList) {
+      const bucket = ageBucket(row.date);
+      const cur = totals.get(bucket) ?? { total: 0, count: 0 };
+      cur.total += row.due;
+      cur.count += 1;
+      totals.set(bucket, cur);
+    }
+    return AGE_BUCKET_ORDER.map((bucket) => ({
+      id: bucket,
+      label: AGE_BUCKET_META[bucket],
+      total: totals.get(bucket)?.total ?? 0,
+      count: totals.get(bucket)?.count ?? 0,
+      tone: bucket === "overdue" ? ("bad" as const) : ("normal" as const),
+    }));
+  }, [dueList]);
+
+  const topDebtors = useMemo(
+    () =>
+      [...dueList]
+        .sort((a, b) => b.due - a.due)
+        .slice(0, 3)
+        .map((r) => ({
+          key: r.key,
+          label: r.label,
+          sub: `${r.sub} · ${formatDMY(r.date)}`,
+          date: r.date,
+          due: r.due,
+          phone: r.phone,
+        })),
+    [dueList],
+  );
+
+
+
   // Partial collection: each row can have its own in-progress amount, which
   // defaults to the full due (so a plain tap on Cash/UPI still settles it in
   // one go, matching the previous behaviour).
@@ -443,7 +487,10 @@ export function DashboardTab() {
       return;
     }
     const newPaid = row.paid + amount;
-    const isFullySettled = newPaid >= row.total - 0.01;
+    // Settled when THIS record's own due is cleared — part of its gross may
+    // legitimately sit on the running tab, so compare against `due`, not
+    // against the gross total.
+    const isFullySettled = amount >= row.due - 0.01;
     if (row.kind === "bill") {
       updateBill.mutate(
         {
@@ -552,7 +599,7 @@ export function DashboardTab() {
   ];
 
   return (
-    <div className="space-y-6">
+    <LayoutSections tabId="home" className="space-y-6">
       <SectionHeading
         eyebrow="TODAY"
         title="Dashboard"
@@ -560,264 +607,323 @@ export function DashboardTab() {
         icon={IndianRupee}
       />
 
-      {dueReportKey && (
-        <Card className="frost lift border-primary/30">
-          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-            <div className="flex min-w-0 items-center gap-2 text-sm">
-              <CalendarClock className="h-4 w-4 shrink-0 text-primary" />
-              <span className="min-w-0 truncate">
-                Your <strong>{monthLabel(dueReportKey)}</strong> statement is ready to share.
-              </span>
-            </div>
-            <div className="flex shrink-0 gap-2">
-              <Button size="sm" variant="ghost" onClick={() => dismissMonthlyReport(dueReportKey)}>
-                Not now
-              </Button>
-              <Button size="sm" onClick={() => shareMonthlyReport(dueReportKey)}>
-                <MessageCircle className="h-3.5 w-3.5" /> Share on WhatsApp
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      {insightStrip.length > 0 && (
-        <Card className="frost border-primary/20">
-          <CardContent className="space-y-1.5 p-4">
-            <p className="micro-label mb-1 flex items-center gap-1.5">
-              <Lightbulb className="h-3.5 w-3.5 text-primary" /> Insights
-            </p>
-            {insightStrip.map((line, i) => (
-              <p key={i} className="flex items-start gap-2 text-sm">
-                <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                <span>{line}</span>
-              </p>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      <section className="space-y-3">
-        <SectionHeading eyebrow="RIGHT NOW" title="Today's headline numbers" />
-        <div className="grid gap-3 sm:grid-cols-2">
-          <HeroStat
-            label="Collected today"
-            value={money(day.collected)}
-            hint="Bills + turf + snacks"
-            icon={IndianRupee}
-            tone="good"
-          />
-          <HeroStat
-            label="Pending dues"
-            value={money(totals.totalDue)}
-            hint={`${dueList.length} unpaid · bills + turf`}
-            icon={AlertCircle}
-            tone={totals.totalDue > 0 ? "bad" : "primary"}
-          />
-        </div>
-
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          {supportingCards.map((c) => (
-            <MiniStat key={c.title} label={c.title} value={c.value} hint={c.hint} icon={c.icon} />
-          ))}
-        </div>
-      </section>
-
-      <section className="space-y-3">
-        <SectionHeading
-          eyebrow="THIS MONTH"
-          title={`${monthLabel(thisMonth)} vs ${monthLabel(prevMonthKey(thisMonth))}`}
-          icon={TrendingUp}
-        />
-        <Card className="frost">
-          <CardContent className="grid grid-cols-2 gap-3 p-4 lg:grid-cols-5">
-            {monthCards.map((c) => (
-              <div key={c.title} className="frost-soft rounded-xl border p-3">
-                <p className="micro-label">{c.title}</p>
-                <p className="stat-value mt-1 text-lg leading-tight">{money(c.value)}</p>
-                <DeltaStat change={c.change} invert={c.invert} />
+      <LayoutSection id="home.report-ready">
+        {dueReportKey && (
+          <Card className="frost lift border-primary/30">
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+              <div className="flex min-w-0 items-center gap-2 text-sm">
+                <CalendarClock className="h-4 w-4 shrink-0 text-primary" />
+                <span className="min-w-0 truncate">
+                  Your <strong>{monthLabel(dueReportKey)}</strong> statement is ready to share.
+                </span>
               </div>
-            ))}
-          </CardContent>
-        </Card>
-      </section>
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => dismissMonthlyReport(dueReportKey)}
+                >
+                  Not now
+                </Button>
+                <Button size="sm" onClick={() => shareMonthlyReport(dueReportKey)}>
+                  <MessageCircle className="h-3.5 w-3.5" /> Share on WhatsApp
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+      </LayoutSection>
 
-      <section className="space-y-3">
-        <SectionHeading eyebrow="TRENDS" title="Collected vs expenses · last 14 days" />
-        <Card className="frost">
-          <CardContent className="h-64 px-2 pt-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={daily}>
-                <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                <XAxis dataKey="day" fontSize={10} interval="preserveStartEnd" />
-                <YAxis fontSize={10} width={44} />
-                <Tooltip formatter={(v: number) => money(v)} />
-                <Bar dataKey="Collected" fill="var(--chart-1)" radius={4} />
-                <Bar dataKey="Expenses" fill="var(--chart-3)" radius={4} />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section className="space-y-3">
-        <SectionHeading eyebrow="CASH DRAWER" title="Cash in drawer today" icon={PiggyBank} />
-        <Card className="frost">
-          <CardContent className="p-4">
-            <div className="frost-well rounded-xl p-4">
-              <p
-                className={cn(
-                  "stat-hero",
-                  cashReconciliation.expectedInDrawer < 0 ? "text-destructive" : "text-success",
-                )}
-              >
-                {money(cashReconciliation.expectedInDrawer)}
+      <LayoutSection id="home.insights">
+        {insightStrip.length > 0 && (
+          <Card className="frost border-primary/20">
+            <CardContent className="space-y-1.5 p-4">
+              <p className="micro-label mb-1 flex items-center gap-1.5">
+                <Lightbulb className="h-3.5 w-3.5 text-primary" /> Insights
               </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {money(cashReconciliation.cashCollectedToday)} cash collected −{" "}
-                {money(cashReconciliation.cashExpensesToday)} expenses today. Count the till against
-                this at closing (expenses are assumed cash unless you track otherwise).
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </section>
+              {insightStrip.map((line, i) => (
+                <p key={i} className="flex items-start gap-2 text-sm">
+                  <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                  <span>{line}</span>
+                </p>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+      </LayoutSection>
 
-      <section className="space-y-3">
-        <SectionHeading eyebrow="TRENDS" title="Profit trend · 6 months" />
-        <Card className="frost">
-          <CardContent className="h-64 px-2 pt-4">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={trend}>
-                <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
-                <XAxis dataKey="month" fontSize={11} />
-                <YAxis fontSize={10} width={44} />
-                <Tooltip formatter={(v: number) => money(v)} />
-                <Line type="monotone" dataKey="Revenue" stroke="var(--chart-1)" strokeWidth={2} />
-                <Line type="monotone" dataKey="Profit" stroke="var(--chart-2)" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </section>
-
-      <PaymentSplitCard data={split} subtitle={monthLabel(thisMonth)} />
-
-      <TurfUtilizationCard bookings={bookings} />
-
-      <section className="space-y-3">
-        <SectionHeading
-          eyebrow="COLLECTIONS"
-          title="Collect now"
-          hint={`${money(totals.totalDue)} outstanding`}
-          action={
-            <SortMenu
-              options={DUES_SORT_OPTIONS}
-              field={dueSort.field}
-              dir={dueSort.dir}
-              onFieldChange={(f) => {
-                dueSort.setField(f);
-                setDueVisible(25);
-              }}
-              onToggleDir={() => {
-                dueSort.toggleDir();
-                setDueVisible(25);
-              }}
+      <LayoutSection id="home.today-numbers">
+        <section className="space-y-3">
+          <LayoutParts sectionId="home.today-numbers" className="space-y-3">
+          <LayoutPart id="home.today-numbers.heading">
+          <SectionHeading eyebrow="RIGHT NOW" title="Today's headline numbers" />
+          </LayoutPart>
+          <LayoutPart id="home.today-numbers.collected">
+            <HeroStat
+              label="Collected today"
+              value={money(day.collected)}
+              hint="Bills + turf + snacks"
+              icon={IndianRupee}
+              tone="good"
             />
-          }
-        />
-        <Card className="frost">
-          <CardContent className="space-y-4 p-4">
-            {dueList.length === 0 && (
-              <p className="flex items-center justify-center gap-1.5 py-6 text-center text-sm text-muted-foreground">
-                No pending dues. Everything is collected
-                <PartyPopper className="h-4 w-4 text-success" />
-              </p>
-            )}
-            {groupedDueList.map(({ bucket, rows }) => (
-              <div key={bucket} className="space-y-2">
+          </LayoutPart>
+          <LayoutPart id="home.today-numbers.pending">
+            <HeroStat
+              label="Pending dues"
+              value={money(totals.totalDue)}
+              hint={`${dueList.length} unpaid · bills + turf`}
+              icon={AlertCircle}
+              tone={totals.totalDue > 0 ? "bad" : "primary"}
+            />
+          </LayoutPart>
+
+          <LayoutPart id="home.today-numbers.supporting" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {supportingCards.map((c) => (
+              <MiniStat key={c.title} label={c.title} value={c.value} hint={c.hint} icon={c.icon} />
+            ))}
+          </LayoutPart>
+          </LayoutParts>
+        </section>
+      </LayoutSection>
+
+      <LayoutSection id="home.month-compare">
+        <section className="space-y-3">
+          <LayoutParts sectionId="home.month-compare" className="space-y-3">
+          <LayoutPart id="home.month-compare.heading">
+          <SectionHeading
+            eyebrow="THIS MONTH"
+            title={`${monthLabel(thisMonth)} vs ${monthLabel(prevMonthKey(thisMonth))}`}
+            icon={TrendingUp}
+          />
+          </LayoutPart>
+          <LayoutPart id="home.month-compare.cards">
+          <Card className="frost">
+            <CardContent className="grid grid-cols-2 gap-3 p-4 lg:grid-cols-5">
+              {monthCards.map((c) => (
+                <div key={c.title} className="frost-soft rounded-xl border p-3">
+                  <p className="micro-label">{c.title}</p>
+                  <p className="stat-value mt-1 text-lg leading-tight">{money(c.value)}</p>
+                  <DeltaStat change={c.change} invert={c.invert} />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+          </LayoutPart>
+          </LayoutParts>
+        </section>
+      </LayoutSection>
+
+      <LayoutSection id="home.trend-14d">
+        <section className="space-y-3">
+          <SectionHeading eyebrow="TRENDS" title="Collected vs expenses · last 14 days" />
+          <Card className="frost">
+            <CardContent className="h-64 px-2 pt-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={daily}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="day" fontSize={10} interval="preserveStartEnd" />
+                  <YAxis fontSize={10} width={44} />
+                  <Tooltip formatter={(v: number) => money(v)} />
+                  <Bar dataKey="Collected" fill="var(--chart-1)" radius={4} />
+                  <Bar dataKey="Expenses" fill="var(--chart-3)" radius={4} />
+                </BarChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+        </section>
+      </LayoutSection>
+
+      <LayoutSection id="home.cash-drawer">
+        <section className="space-y-3">
+          <LayoutParts sectionId="home.cash-drawer" className="space-y-3">
+          <LayoutPart id="home.cash-drawer.heading">
+          <SectionHeading eyebrow="CASH DRAWER" title="Cash in drawer today" icon={PiggyBank} />
+          </LayoutPart>
+          <LayoutPart id="home.cash-drawer.drawer">
+          <Card className="frost">
+            <CardContent className="p-4">
+              <div className="frost-well rounded-xl p-4">
                 <p
                   className={cn(
-                    "stat-label",
-                    bucket === "overdue" ? "text-destructive" : "text-muted-foreground",
+                    "stat-hero",
+                    cashReconciliation.expectedInDrawer < 0 ? "text-destructive" : "text-success",
                   )}
                 >
-                  {AGE_BUCKET_META[bucket]} · {rows.length}
+                  {money(cashReconciliation.expectedInDrawer)}
                 </p>
-                {rows.map((row) => (
-                  <div
-                    key={row.key}
-                    className="frost-soft lift flex flex-wrap items-center gap-2 rounded-xl border p-3"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium">{row.label}</p>
-                      <p className="truncate text-xs text-muted-foreground">
-                        {row.sub} · {formatDMY(row.date)}
-                      </p>
-                    </div>
-                    <Badge variant="outline" className={LINE_BADGE[row.kind]}>
-                      {row.kind === "bill" ? "Bill" : "Turf"}
-                    </Badge>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {money(cashReconciliation.cashCollectedToday)} cash collected −{" "}
+                  {money(cashReconciliation.cashExpensesToday)} expenses today. Count the till
+                  against this at closing (expenses are assumed cash unless you track otherwise).
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+          </LayoutPart>
+          </LayoutParts>
+        </section>
+      </LayoutSection>
 
-                    <p className="text-sm font-bold text-destructive">{money(row.due)}</p>
-                    <Input
-                      type="number"
-                      min={0}
-                      max={row.due}
-                      value={amountFor(row)}
-                      onChange={(e) =>
-                        setCollectAmounts((prev) => ({ ...prev, [row.key]: e.target.value }))
-                      }
-                      className="h-8 w-20 px-2 text-xs"
-                      aria-label={`Amount to collect from ${row.label}`}
-                    />
-                    <div className="flex gap-1">
-                      {row.phone && (
+      <LayoutSection id="home.profit-trend">
+        <section className="space-y-3">
+          <SectionHeading eyebrow="TRENDS" title="Profit trend · 6 months" />
+          <Card className="frost">
+            <CardContent className="h-64 px-2 pt-4">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trend}>
+                  <CartesianGrid strokeDasharray="3 3" opacity={0.2} />
+                  <XAxis dataKey="month" fontSize={11} />
+                  <YAxis fontSize={10} width={44} />
+                  <Tooltip formatter={(v: number) => money(v)} />
+                  <Line type="monotone" dataKey="Revenue" stroke="var(--chart-1)" strokeWidth={2} />
+                  <Line type="monotone" dataKey="Profit" stroke="var(--chart-2)" strokeWidth={2} />
+                </LineChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
+        </section>
+      </LayoutSection>
+
+      <LayoutSection id="home.dues-focus">
+        <DuesFocusCard
+          total={totals.totalDue}
+          buckets={dueBuckets}
+          topDebtors={topDebtors}
+          cashCollected={collectedTodayByMode.cash}
+          onlineCollected={collectedTodayByMode.online}
+          onRemind={(row) => {
+            const match = dueList.find((r) => r.key === row.key);
+            if (match) sendReminder(match);
+          }}
+        />
+      </LayoutSection>
+
+
+      <LayoutSection id="home.turf-utilization">
+        <TurfUtilizationCard bookings={bookings} />
+      </LayoutSection>
+
+      <LayoutSection id="home.collect-now">
+        <section className="space-y-3">
+          <LayoutParts sectionId="home.collect-now" className="space-y-3">
+          <LayoutPart id="home.collect-now.heading">
+          <SectionHeading
+            eyebrow="COLLECTIONS"
+            title="Collect now"
+            hint={`${money(totals.totalDue)} outstanding`}
+            action={
+              <SortMenu
+                options={DUES_SORT_OPTIONS}
+                field={dueSort.field}
+                dir={dueSort.dir}
+                onFieldChange={(f) => {
+                  dueSort.setField(f);
+                  setDueVisible(25);
+                }}
+                onToggleDir={() => {
+                  dueSort.toggleDir();
+                  setDueVisible(25);
+                }}
+              />
+            }
+          />
+          </LayoutPart>
+          <LayoutPart id="home.collect-now.list">
+          <Card className="frost">
+            <CardContent className="space-y-4 p-4">
+              {dueList.length === 0 && (
+                <p className="flex items-center justify-center gap-1.5 py-6 text-center text-sm text-muted-foreground">
+                  No pending dues. Everything is collected
+                  <PartyPopper className="h-4 w-4 text-success" />
+                </p>
+              )}
+              {groupedDueList.map(({ bucket, rows }) => (
+                <div key={bucket} className="space-y-2">
+                  <p
+                    className={cn(
+                      "stat-label",
+                      bucket === "overdue" ? "text-destructive" : "text-muted-foreground",
+                    )}
+                  >
+                    {AGE_BUCKET_META[bucket]} · {rows.length}
+                  </p>
+                  {rows.map((row) => (
+                    <div
+                      key={row.key}
+                      className="frost-soft lift flex flex-wrap items-center gap-2 rounded-xl border p-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium">{row.label}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          {row.sub} · {formatDMY(row.date)}
+                        </p>
+                      </div>
+                      <Badge variant="outline" className={LINE_BADGE[row.kind]}>
+                        {row.kind === "bill" ? "Bill" : "Turf"}
+                      </Badge>
+
+                      <p className="text-sm font-bold text-destructive">{money(row.due)}</p>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={row.due}
+                        value={amountFor(row)}
+                        onChange={(e) =>
+                          setCollectAmounts((prev) => ({ ...prev, [row.key]: e.target.value }))
+                        }
+                        className="h-8 w-20 px-2 text-xs"
+                        aria-label={`Amount to collect from ${row.label}`}
+                      />
+                      <div className="flex gap-1">
+                        {row.phone && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-8 w-8 p-0"
+                            onClick={() => sendReminder(row)}
+                            aria-label={`Send WhatsApp reminder to ${row.label}`}
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         <Button
                           size="sm"
-                          variant="ghost"
-                          className="h-8 w-8 p-0"
-                          onClick={() => sendReminder(row)}
-                          aria-label={`Send WhatsApp reminder to ${row.label}`}
+                          variant="outline"
+                          className="h-8 gap-1 px-2 text-xs"
+                          onClick={() => collect(row, "Cash")}
+                          disabled={updateBill.isPending || updateBooking.isPending}
                         >
-                          <MessageCircle className="h-3.5 w-3.5" />
+                          <Banknote className="h-3.5 w-3.5" /> Cash
                         </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 gap-1 px-2 text-xs"
-                        onClick={() => collect(row, "Cash")}
-                        disabled={updateBill.isPending || updateBooking.isPending}
-                      >
-                        <Banknote className="h-3.5 w-3.5" /> Cash
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="h-8 gap-1 px-2 text-xs"
-                        onClick={() => collect(row, "UPI")}
-                        disabled={updateBill.isPending || updateBooking.isPending}
-                      >
-                        <Smartphone className="h-3.5 w-3.5" /> UPI
-                      </Button>
+                        <Button
+                          size="sm"
+                          className="h-8 gap-1 px-2 text-xs"
+                          onClick={() => collect(row, "UPI")}
+                          disabled={updateBill.isPending || updateBooking.isPending}
+                        >
+                          <Smartphone className="h-3.5 w-3.5" /> UPI
+                        </Button>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            ))}
-            {dueList.length > dueVisible && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="w-full"
-                onClick={() => setDueVisible((v) => v + 25)}
-              >
-                Show more ({dueList.length - dueVisible} remaining)
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      </section>
-    </div>
+                  ))}
+                </div>
+              ))}
+              {dueList.length > dueVisible && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => setDueVisible((v) => v + 25)}
+                >
+                  Show more ({dueList.length - dueVisible} remaining)
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+          </LayoutPart>
+          </LayoutParts>
+        </section>
+      </LayoutSection>
+    </LayoutSections>
   );
 }

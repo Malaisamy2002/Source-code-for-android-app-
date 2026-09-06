@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { SectionHeading } from "@/components/app/SectionHeading";
+import { LayoutPart, LayoutParts } from "./LayoutSection";
 import {
   Select,
   SelectContent,
@@ -121,6 +122,8 @@ export function SnackStockCard() {
   return (
     <Card>
       <CardContent className="space-y-4">
+        <LayoutParts sectionId="snacks.stock" className="space-y-4">
+        <LayoutPart id="snacks.stock.heading" className="space-y-4">
         <SectionHeading
           icon={Boxes}
           eyebrow="Inventory"
@@ -167,7 +170,9 @@ export function SnackStockCard() {
             </p>
           </div>
         )}
+        </LayoutPart>
 
+        <LayoutPart id="snacks.stock.table" className="space-y-4">
         {groups.map(([groupName, groupItems]) => (
           <div key={groupName} className="space-y-2">
             {category === ALL_CATEGORIES && categories.length > 1 && (
@@ -201,6 +206,8 @@ export function SnackStockCard() {
             ))}
           </div>
         ))}
+        </LayoutPart>
+        </LayoutParts>
       </CardContent>
     </Card>
   );

@@ -1,5 +1,5 @@
 import { db, table, DATA_TABLES, type DataTable, type Row } from "./localdb";
-import { saveFile } from "./desktop";
+import { isDesktop } from "./desktop";
 
 export const BACKUP_TABLES = DATA_TABLES;
 
@@ -31,23 +31,41 @@ export function backupFileName() {
 }
 
 /**
- * Saves a backup to disk/share. Returns the filename on success, or `null`
- * if the person cancelled (a desktop Save dialog or a mobile share sheet) —
- * callers use that to avoid claiming success when nothing was actually
- * saved anywhere. See `saveFile` in desktop.ts for the browser/desktop/
- * mobile split, including why mobile goes through the share sheet instead
- * of the same dialog+fs pairing desktop uses.
+ * Saves a backup to disk. In the browser/PWA this is a Blob + `<a download>`
+ * click (fire-and-forget, no result). In the desktop shell it opens a native
+ * Save dialog via `tauri-plugin-dialog` + `tauri-plugin-fs`; returns the path
+ * the user chose, or `null` if they cancelled the dialog.
+ *
+ * Kept async (the browser branch always did the work synchronously, so
+ * existing unawaited call sites keep working unchanged) so BackupCard/
+ * ArchiveCard can `await` it to know whether a desktop save was cancelled.
  */
 export async function downloadBackup(
   backup: BackupFile,
   name = backupFileName(),
 ): Promise<string | null> {
   const text = JSON.stringify(backup, null, 2);
-  const ok = await saveFile(text, name, "application/json", {
-    name: "Ledger backup",
-    extensions: ["db", "json"],
-  });
-  return ok ? name : null;
+
+  if (isDesktop()) {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+    const path = await save({
+      defaultPath: name,
+      filters: [{ name: "Ledger backup", extensions: ["db", "json"] }],
+    });
+    if (!path) return null; // user cancelled — caller should not claim success
+    await writeTextFile(path, text);
+    return path;
+  }
+
+  const blob = new Blob([text], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+  return name;
 }
 
 /**

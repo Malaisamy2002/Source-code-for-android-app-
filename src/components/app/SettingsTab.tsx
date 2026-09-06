@@ -1,28 +1,33 @@
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-  Archive,
-  CalendarClock,
-  FlaskConical,
-  Github,
-  ImageIcon,
-  MessageCircle,
-  Palette,
   Plus,
-  Printer,
-  Receipt,
   Save,
   SlidersHorizontal,
-  Tags,
   Trash2,
+  Palette,
+  Image as ImageIcon,
+  Receipt as ReceiptIcon,
+  MessageCircle,
+  CalendarClock,
+  Trophy,
+  Cookie,
+  Layers,
+  Printer,
   Users,
-  UtensilsCrossed,
+  Archive as ArchiveIcon,
+  Download as DownloadIcon,
+  Images as ImagesIcon,
+  LayoutDashboard,
+  AlertTriangle,
+  FlaskConical,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Accordion } from "@/components/ui/accordion";
 import {
   Select,
   SelectContent,
@@ -51,20 +56,31 @@ import {
   useSnackCombos,
   useSnackItems,
   useTurfRates,
+  useSlotDurations,
+  useSaveSlotDurations,
+  DEFAULT_SLOT_DURATIONS,
+  MAX_COURTS,
+  clampCourts,
+  type SlotDurations,
   type SnackCombo,
   type SnackItem,
   type TurfRate,
 } from "@/lib/ops";
 import { compareBy, useSortState, type SortOption } from "@/lib/sort";
+import { usePersistedState } from "@/lib/ui-prefs";
 import { SectionHeading } from "./SectionHeading";
 import { SettingsSection } from "./SettingsSection";
+import { LayoutSection, LayoutSections } from "./LayoutSection";
+import { LayoutSettingsCard } from "./LayoutSettingsCard";
 import { SortMenu } from "./SortMenu";
 import { PrintSettingsCard } from "./PrintSettingsCard";
 import { InvoiceBrandingCard } from "./InvoiceBrandingCard";
 import { BackupCard } from "./BackupCard";
+import { ReceiptsCard } from "./ReceiptsCard";
 import { MonthlyReportCard } from "./MonthlyReportCard";
-import { LoadTestCard } from "./LoadTestCard";
 import { ArchiveCard } from "./ArchiveCard";
+import { ClearAllDataCard } from "./ClearAllDataCard";
+import { LoadTestCard } from "./LoadTestCard";
 import { CustomerDirectoryCard } from "./CustomerDirectoryCard";
 import { ThemeCustomizerCard } from "./ThemeCustomizerCard";
 import { BillingSettingsCard } from "./BillingSettingsCard";
@@ -196,6 +212,79 @@ function TurfRateRow({ rate }: { rate: TurfRate }) {
         Leave a duration empty to auto-calculate it from the hourly rate.
       </p>
     </div>
+  );
+}
+
+/** Global on/off switches for which slot durations can be picked on new turf
+ * bookings — one set of toggles that applies to every rate/slot. */
+function SlotDurationsCard() {
+  const { data: durations = DEFAULT_SLOT_DURATIONS } = useSlotDurations();
+  const save = useSaveSlotDurations();
+
+  const toggle = (key: keyof SlotDurations, v: boolean) => {
+    if (!v) {
+      const others = (["allow_15", "allow_30", "allow_45", "allow_60"] as const).filter(
+        (k) => k !== key,
+      );
+      if (!others.some((k) => durations[k])) {
+        toast.error("Keep at least one slot duration on");
+        return;
+      }
+    }
+    save.mutate({ ...durations, [key]: v });
+  };
+
+  return (
+    <Card className="frost">
+      <CardHeader className="p-4 pb-2">
+        <CardTitle className="text-sm">Slot durations for new bookings</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 p-4 pt-0">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          {(
+            [
+              ["15 min", "allow_15"],
+              ["30 min", "allow_30"],
+              ["45 min", "allow_45"],
+              ["1 hr", "allow_60"],
+            ] as const
+          ).map(([label, key]) => (
+            <div
+              key={key}
+              className="frost-soft flex items-center justify-between gap-2 rounded-xl border p-3"
+            >
+              <Label className="text-sm">{label}</Label>
+              <Switch
+                checked={durations[key]}
+                aria-label={`${label} slots available`}
+                onCheckedChange={(v) => toggle(key, v)}
+              />
+            </div>
+          ))}
+        </div>
+        <p className="micro-label text-muted-foreground">
+          Switch a duration off to hide it from the New Turf Booking form for every slot.
+        </p>
+        <div className="frost-soft flex items-center justify-between gap-3 rounded-xl border p-3">
+          <div>
+            <Label className="text-sm">Courts available</Label>
+            <p className="micro-label text-muted-foreground">
+              A time slot only shows as booked once every court is taken.
+            </p>
+          </div>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={MAX_COURTS}
+            className="w-20 text-center"
+            aria-label="Courts available"
+            value={durations.total_courts ?? 1}
+            onChange={(e) => save.mutate({ ...durations, total_courts: clampCourts(e.target.value) })}
+          />
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -542,6 +631,8 @@ export function SettingsTab() {
     items: SnackCombo["items"];
   }>({ name: "", price: "", items: [] });
 
+  const [openSections, setOpenSections] = usePersistedState<string[]>("settings-open-sections", []);
+
   return (
     <div className="space-y-6">
       <SectionHeading
@@ -550,313 +641,392 @@ export function SettingsTab() {
         hint="Pricing, menu, branding, printing and backups — all in one place"
         icon={SlidersHorizontal}
       />
-      <SettingsSection
-        id="github-backup"
-        eyebrow="DATA SAFETY"
-        title="GitHub backup & restore"
-        hint="Push and pull your data from your GitHub repository"
-        icon={Github}
-        defaultOpen
-      >
-        <BackupCard />
-      </SettingsSection>
-
-      <SettingsSection id="theme" eyebrow="LOOK & FEEL" title="Theme" icon={Palette}>
-        <ThemeCustomizerCard />
-      </SettingsSection>
-
-      <SettingsSection
-        id="branding"
-        eyebrow="BRANDING"
-        title="Invoice generator"
-        icon={ImageIcon}
-      >
-        <InvoiceBrandingCard />
-      </SettingsSection>
-
-      <SettingsSection id="billing" eyebrow="BILLING" title="Billing & GST" icon={Receipt}>
-        <BillingSettingsCard />
-      </SettingsSection>
-
-      <SettingsSection
-        id="whatsapp"
-        eyebrow="SHARING"
-        title="WhatsApp summary"
-        icon={MessageCircle}
-      >
-        <WhatsAppSummaryCard />
-      </SettingsSection>
-
-      <SettingsSection
-        id="monthly-report"
-        eyebrow="REMINDERS"
-        title="Monthly report"
-        icon={CalendarClock}
-      >
-        <MonthlyReportCard />
-      </SettingsSection>
-
-      <SettingsSection id="load-test" eyebrow="DIAGNOSTICS" title="Load test" icon={FlaskConical}>
-        <LoadTestCard />
-      </SettingsSection>
-
-      <SettingsSection id="turf-rates" eyebrow="PRICING" title="Turf rates" icon={Tags}>
-        {rates.length > 0 && (
-          <div className="flex justify-end">
-            <SortMenu
-              options={TURF_RATE_SORT_OPTIONS}
-              field={rateSort.field}
-              dir={rateSort.dir}
-              onFieldChange={rateSort.setField}
-              onToggleDir={rateSort.toggleDir}
-            />
-          </div>
-        )}
-        <Card className="frost">
-          <CardContent className="space-y-3 p-4">
-            {sortedRates.map((r) => (
-              <TurfRateRow key={r.id} rate={r} />
-            ))}
-
-            <div className="frost-well grid grid-cols-2 gap-2 rounded-xl border border-dashed p-3 md:grid-cols-[1fr_140px_auto] md:items-center">
-              <div className="space-y-1">
-                <Label className="micro-label">New slot</Label>
-                <Input
-                  value={newRate.slot_name}
-                  onChange={(e) => setNewRate({ ...newRate, slot_name: e.target.value })}
-                  placeholder="e.g. Weekend Night"
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="micro-label">Rate / hr</Label>
-                <Input
-                  inputMode="decimal"
-                  value={newRate.rate_per_hour}
-                  onChange={(e) => setNewRate({ ...newRate, rate_per_hour: e.target.value })}
-                  placeholder="1200"
-                />
-              </div>
-              <Button
-                className="col-span-2 md:col-span-1 md:mt-5"
-                onClick={() => {
-                  if (!newRate.slot_name.trim()) {
-                    toast.error("Slot name required");
-                    return;
-                  }
-                  saveRate.mutate(
-                    {
-                      slot_name: newRate.slot_name.trim(),
-                      rate_per_hour: Number(newRate.rate_per_hour) || 0,
-                      is_active: true,
-                    },
-                    {
-                      onSuccess: () => {
-                        setNewRate({ slot_name: "", rate_per_hour: "" });
-                        toast.success("Slot added");
-                      },
-                    },
-                  );
-                }}
-              >
-                <Plus className="mr-1 h-4 w-4" /> Add slot
-              </Button>
-            </div>
-
-            <p className="text-xs text-muted-foreground">
-              Defaults: Weekdays {money(1200)}/hr · Weekends {money(1400)}/hr — edit anytime.
-            </p>
-          </CardContent>
-        </Card>
-      </SettingsSection>
-
-      <SettingsSection
-        id="snack-items"
-        eyebrow="MENU"
-        title="Snack items"
-        icon={UtensilsCrossed}
-      >
-        {items.length > 0 && (
-          <div className="flex justify-end">
-            <SortMenu
-              options={SNACK_ITEM_SORT_OPTIONS}
-              field={itemSort.field}
-              dir={itemSort.dir}
-              onFieldChange={itemSort.setField}
-              onToggleDir={itemSort.toggleDir}
-            />
-          </div>
-        )}
-        <Card className="frost">
-          <CardContent className="space-y-3 p-4">
-            {sortedItems.map((i) => (
-              <SnackItemRow key={i.id} item={i} />
-            ))}
-
-            <div className="frost-well grid grid-cols-2 gap-2 rounded-xl border border-dashed p-3 md:grid-cols-[1.4fr_1fr_110px_110px_auto] md:items-end">
-              <div className="space-y-1">
-                <Label className="micro-label">Item</Label>
-                <Input
-                  value={newItem.item_name}
-                  onChange={(e) => setNewItem({ ...newItem, item_name: e.target.value })}
-                  placeholder="e.g. Tea"
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="micro-label">Category</Label>
-                <Input
-                  value={newItem.category}
-                  onChange={(e) => setNewItem({ ...newItem, category: e.target.value })}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="micro-label">Sell ₹</Label>
-                <Input
-                  inputMode="decimal"
-                  value={newItem.unit_price}
-                  onChange={(e) => setNewItem({ ...newItem, unit_price: e.target.value })}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="micro-label">Cost ₹</Label>
-                <Input
-                  inputMode="decimal"
-                  value={newItem.cost_price}
-                  onChange={(e) => setNewItem({ ...newItem, cost_price: e.target.value })}
-                />
-              </div>
-              <Button
-                className="col-span-2 md:col-span-1"
-                onClick={() => {
-                  if (!newItem.item_name.trim()) {
-                    toast.error("Item name required");
-                    return;
-                  }
-                  saveItem.mutate(
-                    {
-                      item_name: newItem.item_name.trim(),
-                      category: newItem.category || "General",
-                      unit_price: Number(newItem.unit_price) || 0,
-                      cost_price: Number(newItem.cost_price) || 0,
-                      is_active: true,
-                    },
-                    {
-                      onSuccess: () => {
-                        setNewItem({
-                          item_name: "",
-                          category: "General",
-                          unit_price: "",
-                          cost_price: "",
-                        });
-                        toast.success("Item added");
-                      },
-                    },
-                  );
-                }}
-              >
-                <Plus className="mr-1 h-4 w-4" /> Add item
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </SettingsSection>
-
-      <SettingsSection
-        id="snack-combos"
-        eyebrow="MENU"
-        title="Snack combos"
-        icon={UtensilsCrossed}
-      >
-        {combos.length > 0 && (
-          <div className="flex justify-end">
-            <SortMenu
-              options={SNACK_COMBO_SORT_OPTIONS}
-              field={comboSort.field}
-              dir={comboSort.dir}
-              onFieldChange={comboSort.setField}
-              onToggleDir={comboSort.toggleDir}
-            />
-          </div>
-        )}
-        <Card className="frost">
-          <CardContent className="space-y-3 p-4">
-            {sortedCombos.map((c) => (
-              <ComboRow key={c.id} combo={c} snackItems={items} />
-            ))}
-
-            <div className="frost-well space-y-3 rounded-xl border border-dashed p-3">
-              <div className="grid grid-cols-2 gap-2 md:grid-cols-[1.4fr_140px_auto] md:items-end">
-                <div className="space-y-1">
-                  <Label className="micro-label">New combo name</Label>
-                  <Input
-                    value={newCombo.name}
-                    onChange={(e) => setNewCombo({ ...newCombo, name: e.target.value })}
-                    placeholder="e.g. Tea + Bun"
+      <Accordion type="multiple" value={openSections} onValueChange={setOpenSections}>
+        <LayoutSections tabId="settings" className="space-y-3">
+          <LayoutSection id="settings.backup">
+            <SettingsSection
+              value="backup"
+              eyebrow="DATA SAFETY"
+              title="Backup & restore"
+              icon={DownloadIcon}
+            >
+              <BackupCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.receipts">
+            <SettingsSection
+              value="receipts"
+              eyebrow="DATA SAFETY"
+              title="Receipts sharing"
+              icon={ImagesIcon}
+            >
+              <ReceiptsCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.turf-rates">
+            <SettingsSection
+              value="turf-rates"
+              eyebrow="PRICING"
+              title="Turf rates"
+              icon={Trophy}
+              action={
+                rates.length > 0 ? (
+                  <SortMenu
+                    options={TURF_RATE_SORT_OPTIONS}
+                    field={rateSort.field}
+                    dir={rateSort.dir}
+                    onFieldChange={rateSort.setField}
+                    onToggleDir={rateSort.toggleDir}
                   />
-                </div>
-                <div className="space-y-1">
-                  <Label className="micro-label">Combo price ₹</Label>
-                  <Input
-                    inputMode="decimal"
-                    value={newCombo.price}
-                    onChange={(e) => setNewCombo({ ...newCombo, price: e.target.value })}
+                ) : undefined
+              }
+            >
+              <SlotDurationsCard />
+              <Card className="frost">
+                <CardContent className="space-y-3 p-4">
+                  {sortedRates.map((r) => (
+                    <TurfRateRow key={r.id} rate={r} />
+                  ))}
+
+                  <div className="frost-well grid grid-cols-2 gap-2 rounded-xl border border-dashed p-3 md:grid-cols-[1fr_140px_auto] md:items-center">
+                    <div className="space-y-1">
+                      <Label className="micro-label">New slot</Label>
+                      <Input
+                        value={newRate.slot_name}
+                        onChange={(e) => setNewRate({ ...newRate, slot_name: e.target.value })}
+                        placeholder="e.g. Weekend Night"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="micro-label">Rate / hr</Label>
+                      <Input
+                        inputMode="decimal"
+                        value={newRate.rate_per_hour}
+                        onChange={(e) => setNewRate({ ...newRate, rate_per_hour: e.target.value })}
+                        placeholder="1200"
+                      />
+                    </div>
+                    <Button
+                      className="col-span-2 md:col-span-1 md:mt-5"
+                      onClick={() => {
+                        if (!newRate.slot_name.trim()) {
+                          toast.error("Slot name required");
+                          return;
+                        }
+                        saveRate.mutate(
+                          {
+                            slot_name: newRate.slot_name.trim(),
+                            rate_per_hour: Number(newRate.rate_per_hour) || 0,
+                            is_active: true,
+                          },
+                          {
+                            onSuccess: () => {
+                              setNewRate({ slot_name: "", rate_per_hour: "" });
+                              toast.success("Slot added");
+                            },
+                          },
+                        );
+                      }}
+                    >
+                      <Plus className="mr-1 h-4 w-4" /> Add slot
+                    </Button>
+                  </div>
+
+                  <p className="text-xs text-muted-foreground">
+                    Defaults: Weekdays {money(1200)}/hr · Weekends {money(1400)}/hr — edit anytime.
+                  </p>
+                </CardContent>
+              </Card>
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.snack-items">
+            <SettingsSection
+              value="snack-items"
+              eyebrow="MENU"
+              title="Snack items"
+              icon={Cookie}
+              action={
+                items.length > 0 ? (
+                  <SortMenu
+                    options={SNACK_ITEM_SORT_OPTIONS}
+                    field={itemSort.field}
+                    dir={itemSort.dir}
+                    onFieldChange={itemSort.setField}
+                    onToggleDir={itemSort.toggleDir}
                   />
-                </div>
-                <Button
-                  className="col-span-2 md:col-span-1"
-                  onClick={() => {
-                    if (!newCombo.name.trim()) {
-                      toast.error("Combo name required");
-                      return;
-                    }
-                    if (newCombo.items.length === 0) {
-                      toast.error("Add at least one item");
-                      return;
-                    }
-                    saveCombo.mutate(
-                      {
-                        name: newCombo.name.trim(),
-                        price: Number(newCombo.price) || 0,
-                        items: newCombo.items,
-                        is_active: true,
-                      },
-                      {
-                        onSuccess: () => {
-                          setNewCombo({ name: "", price: "", items: [] });
-                          toast.success("Combo added");
-                        },
-                      },
-                    );
-                  }}
-                >
-                  <Plus className="mr-1 h-4 w-4" /> Add combo
-                </Button>
-              </div>
-              <ComboItemsEditor
-                items={newCombo.items}
-                onChange={(its) => setNewCombo({ ...newCombo, items: its })}
-                snackItems={items}
-              />
-            </div>
-          </CardContent>
-        </Card>
-      </SettingsSection>
+                ) : undefined
+              }
+            >
+              <Card className="frost">
+                <CardContent className="space-y-3 p-4">
+                  {sortedItems.map((i) => (
+                    <SnackItemRow key={i.id} item={i} />
+                  ))}
 
-      <SettingsSection
-        id="printing"
-        eyebrow="RECEIPTS"
-        title="Printer & receipt format"
-        icon={Printer}
-      >
-        <PrintSettingsCard />
-      </SettingsSection>
+                  <div className="frost-well grid grid-cols-2 gap-2 rounded-xl border border-dashed p-3 md:grid-cols-[1.4fr_1fr_110px_110px_auto] md:items-end">
+                    <div className="space-y-1">
+                      <Label className="micro-label">Item</Label>
+                      <Input
+                        value={newItem.item_name}
+                        onChange={(e) => setNewItem({ ...newItem, item_name: e.target.value })}
+                        placeholder="e.g. Tea"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="micro-label">Category</Label>
+                      <Input
+                        value={newItem.category}
+                        onChange={(e) => setNewItem({ ...newItem, category: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="micro-label">Sell ₹</Label>
+                      <Input
+                        inputMode="decimal"
+                        value={newItem.unit_price}
+                        onChange={(e) => setNewItem({ ...newItem, unit_price: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="micro-label">Cost ₹</Label>
+                      <Input
+                        inputMode="decimal"
+                        value={newItem.cost_price}
+                        onChange={(e) => setNewItem({ ...newItem, cost_price: e.target.value })}
+                      />
+                    </div>
+                    <Button
+                      className="col-span-2 md:col-span-1"
+                      onClick={() => {
+                        if (!newItem.item_name.trim()) {
+                          toast.error("Item name required");
+                          return;
+                        }
+                        saveItem.mutate(
+                          {
+                            item_name: newItem.item_name.trim(),
+                            category: newItem.category || "General",
+                            unit_price: Number(newItem.unit_price) || 0,
+                            cost_price: Number(newItem.cost_price) || 0,
+                            is_active: true,
+                          },
+                          {
+                            onSuccess: () => {
+                              setNewItem({
+                                item_name: "",
+                                category: "General",
+                                unit_price: "",
+                                cost_price: "",
+                              });
+                              toast.success("Item added");
+                            },
+                          },
+                        );
+                      }}
+                    >
+                      <Plus className="mr-1 h-4 w-4" /> Add item
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.billing">
+            <SettingsSection
+              value="billing"
+              eyebrow="BILLING"
+              title="Billing & tax"
+              icon={ReceiptIcon}
+            >
+              <BillingSettingsCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.print">
+            <SettingsSection
+              value="print"
+              eyebrow="RECEIPTS"
+              title="Printer & receipt format"
+              icon={Printer}
+            >
+              <PrintSettingsCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.whatsapp">
+            <SettingsSection
+              value="whatsapp"
+              eyebrow="SHARING"
+              title="WhatsApp summary"
+              icon={MessageCircle}
+            >
+              <WhatsAppSummaryCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.customers">
+            <SettingsSection
+              value="customers"
+              eyebrow="CONTACTS"
+              title="Customer directory"
+              icon={Users}
+            >
+              <CustomerDirectoryCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.snack-combos">
+            <SettingsSection
+              value="snack-combos"
+              eyebrow="MENU"
+              title="Snack combos"
+              icon={Layers}
+              action={
+                combos.length > 0 ? (
+                  <SortMenu
+                    options={SNACK_COMBO_SORT_OPTIONS}
+                    field={comboSort.field}
+                    dir={comboSort.dir}
+                    onFieldChange={comboSort.setField}
+                    onToggleDir={comboSort.toggleDir}
+                  />
+                ) : undefined
+              }
+            >
+              <Card className="frost">
+                <CardContent className="space-y-3 p-4">
+                  {sortedCombos.map((c) => (
+                    <ComboRow key={c.id} combo={c} snackItems={items} />
+                  ))}
 
-      <SettingsSection id="customers" eyebrow="CUSTOMERS" title="Customer database" icon={Users}>
-        <CustomerDirectoryCard />
-      </SettingsSection>
-
-      <SettingsSection id="archive" eyebrow="DATA LIFECYCLE" title="Year archive" icon={Archive}>
-        <ArchiveCard />
-      </SettingsSection>
+                  <div className="frost-well space-y-3 rounded-xl border border-dashed p-3">
+                    <div className="grid grid-cols-2 gap-2 md:grid-cols-[1.4fr_140px_auto] md:items-end">
+                      <div className="space-y-1">
+                        <Label className="micro-label">New combo name</Label>
+                        <Input
+                          value={newCombo.name}
+                          onChange={(e) => setNewCombo({ ...newCombo, name: e.target.value })}
+                          placeholder="e.g. Tea + Bun"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="micro-label">Combo price ₹</Label>
+                        <Input
+                          inputMode="decimal"
+                          value={newCombo.price}
+                          onChange={(e) => setNewCombo({ ...newCombo, price: e.target.value })}
+                        />
+                      </div>
+                      <Button
+                        className="col-span-2 md:col-span-1"
+                        onClick={() => {
+                          if (!newCombo.name.trim()) {
+                            toast.error("Combo name required");
+                            return;
+                          }
+                          if (newCombo.items.length === 0) {
+                            toast.error("Add at least one item");
+                            return;
+                          }
+                          saveCombo.mutate(
+                            {
+                              name: newCombo.name.trim(),
+                              price: Number(newCombo.price) || 0,
+                              items: newCombo.items,
+                              is_active: true,
+                            },
+                            {
+                              onSuccess: () => {
+                                setNewCombo({ name: "", price: "", items: [] });
+                                toast.success("Combo added");
+                              },
+                            },
+                          );
+                        }}
+                      >
+                        <Plus className="mr-1 h-4 w-4" /> Add combo
+                      </Button>
+                    </div>
+                    <ComboItemsEditor
+                      items={newCombo.items}
+                      onChange={(its) => setNewCombo({ ...newCombo, items: its })}
+                      snackItems={items}
+                    />
+                  </div>
+                </CardContent>
+              </Card>
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.invoice-branding">
+            <SettingsSection
+              value="invoice-branding"
+              eyebrow="BRANDING"
+              title="Invoice branding"
+              icon={ImageIcon}
+            >
+              <InvoiceBrandingCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.monthly-report">
+            <SettingsSection
+              value="monthly-report"
+              eyebrow="REMINDERS"
+              title="Monthly report"
+              icon={CalendarClock}
+            >
+              <MonthlyReportCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.theme">
+            <SettingsSection
+              value="theme"
+              eyebrow="LOOK & FEEL"
+              title="Appearance & theme"
+              icon={Palette}
+            >
+              <ThemeCustomizerCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.layout">
+            <SettingsSection
+              value="layout"
+              eyebrow="ARRANGEMENT"
+              title="Layout & arrangement"
+              hint="Hide, reorder and save arrangements of tabs and blocks"
+              icon={LayoutDashboard}
+            >
+              <LayoutSettingsCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.archive">
+            <SettingsSection
+              value="archive"
+              eyebrow="DATA LIFECYCLE"
+              title="Year archive"
+              icon={ArchiveIcon}
+            >
+              <ArchiveCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.loadtest">
+            <SettingsSection
+              value="loadtest"
+              eyebrow="TESTING"
+              title="Load test"
+              hint="Seed one realistic year of demo data, benchmark the app on it, remove it again"
+              icon={FlaskConical}
+            >
+              <LoadTestCard />
+            </SettingsSection>
+          </LayoutSection>
+          <LayoutSection id="settings.danger-zone">
+            <SettingsSection
+              value="danger-zone"
+              eyebrow="DANGER ZONE"
+              title="Clear all data"
+              icon={AlertTriangle}
+            >
+              <ClearAllDataCard />
+            </SettingsSection>
+          </LayoutSection>
+        </LayoutSections>
+      </Accordion>
     </div>
   );
 }

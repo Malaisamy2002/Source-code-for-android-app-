@@ -17,8 +17,15 @@
  *   an "On tab" bill is not revenue received.
  */
 
-import { hasCustomNumbering, nextCustomInvoiceNo, readAppSettings } from "./settings";
-import { billGrossTotal, type Bill, type BillItem, type BillStatus } from "./biz";
+import { hasCustomNumbering, nextCustomInvoiceNo, readAppSettings, taxBreakdown } from "./settings";
+import {
+  billGrossTotal,
+  snackSaleGrossTotal,
+  type Bill,
+  type BillItem,
+  type BillStatus,
+  type Unit,
+} from "./biz";
 import { netTabAmountFor } from "./dues";
 import { rupees } from "./money";
 import {
@@ -73,9 +80,24 @@ type Source =
   | { kind: typeof TAB_REF_TURF_BOOKING; id: string; label: string; collected: number }
   | { kind: typeof TAB_REF_SNACK_SALE; id: string; label: string; collected: number };
 
-const bookingCollected = (b: Pick<TurfBookingRow, "advance_paid">) => num(b.advance_paid);
-const saleCollected = (s: Pick<SnackSaleRow, "payment_mode" | "total">) =>
-  s.payment_mode === TAB_PAYMENT_MODE ? 0 : num(s.total);
+/**
+ * Real cash collected on a booking — NOT just `advance_paid` at face value.
+ *
+ * "Put balance on tab" (TurfTab.tsx) zeroes out a booking's own due by
+ * setting `advance_paid` to the FULL `total_amount`, even though only part of
+ * that was ever collected in cash — the rest is a charge sitting on the
+ * customer's tab. Reading `advance_paid` alone here would count that tab
+ * charge as cash TWICE: once as "collected" and again as "already on tab",
+ * making `outstanding` (and therefore the merged bill's status/amount_paid)
+ * understate — or even zero out — a real due. Subtracting `onTab` undoes
+ * exactly that inflation and leaves the genuine cash figure, whether it came
+ * from the original advance or from later tab payments.
+ */
+const bookingCollected = (b: Pick<TurfBookingRow, "advance_paid">, onTab: number) =>
+  Math.max(0, num(b.advance_paid) - onTab);
+const saleCollected = (
+  s: Pick<SnackSaleRow, "payment_mode" | "total" | "tax_amount" | "tax_lines">,
+) => (s.payment_mode === TAB_PAYMENT_MODE ? 0 : snackSaleGrossTotal(s));
 
 /** Shared money math, used by both the dialog preview and the merge itself. */
 export function mergeMath(
@@ -95,23 +117,112 @@ export function mergeMath(
   };
 }
 
+/**
+ * A merged bill's tax, computed exactly the way a normal bill's is: on the
+ * post-discount taxable amount, one rounding per tax line, CGST/SGST split
+ * equally. Merge math (outstanding, tab charge) runs on `gross` so the amount
+ * posted to the customer's tab is the same tax-inclusive figure the printed
+ * invoice shows as Balance due — never the bare pre-tax total.
+ */
+export function mergeTax(
+  total: number,
+  s: Parameters<typeof taxBreakdown>[1] = readAppSettings(),
+) {
+  const taxable = round2(total);
+  const { taxAmount, lines } = taxBreakdown(taxable, s);
+  return { taxable, taxAmount, taxLines: lines, gross: taxable + taxAmount };
+}
+
 /** Preview figures for the merge dialog (no writes). */
 export function previewMerge(args: {
   total: number;
+  /** Tax settings; defaults to the ones in effect right now. */
+  settings?: Parameters<typeof taxBreakdown>[1];
   bookings: { id: string; advance_paid: number }[];
   sales: { id: string; total: number; payment_mode: string }[];
   tabEntries: TabEntryRow[];
 }): MergePreview {
-  return mergeMath(args.total, [
-    ...args.bookings.map((b) => ({
-      collected: num(b.advance_paid),
-      onTab: netTabAmountFor(args.tabEntries, TAB_REF_TURF_BOOKING, b.id),
-    })),
+  return mergeMath(mergeTax(args.total, args.settings ?? readAppSettings()).gross, [
+    ...args.bookings.map((b) => {
+      const onTab = netTabAmountFor(args.tabEntries, TAB_REF_TURF_BOOKING, b.id);
+      return { collected: bookingCollected(b, onTab), onTab };
+    }),
     ...args.sales.map((s) => ({
       collected: saleCollected(s),
       onTab: netTabAmountFor(args.tabEntries, TAB_REF_SNACK_SALE, s.id),
     })),
   ]);
+}
+
+type MergeableBooking = {
+  id: string;
+  booking_no: string;
+  slot_name: string;
+  hours: number;
+  rate_per_hour: number;
+  turf_amount: number;
+  total_amount: number;
+  discount: number;
+};
+type MergeableSaleItem = { item_name: string; qty: number; unit_price: number; amount: number };
+type MergeableSale = { items: MergeableSaleItem[] };
+
+export type MergedItemsResult = {
+  items: BillItem[];
+  /** Sum of every booking's pre-discount turf gross + every snack item — the
+   * merged bill's "Subtotal" line, before the discount below is taken off. */
+  subtotal: number;
+  /** Sum of each selected booking's own discount, pulled back in so a merged
+   * bill can't overcharge for an offer that was already applied. */
+  discount: number;
+  /** subtotal − discount, never negative. */
+  total: number;
+};
+
+/**
+ * Builds the merged bill's line items plus subtotal/discount/total from the
+ * picked turf bookings + snack bills. Shared by the dialog's live preview and
+ * the actual save, so the number shown before merging can never disagree with
+ * what gets written.
+ *
+ * `turf_amount` is every booking's pre-discount gross under the current
+ * schema. A row restored from a backup taken before that field existed has it
+ * as 0/undefined — falling back to `total_amount` there would be wrong, since
+ * total_amount is already NET of that booking's discount, and the discount
+ * gets pulled back in again below. `total_amount + discount` reconstructs the
+ * true gross correctly in both cases: for current bookings this branch never
+ * runs; for legacy rows, total_amount has always equalled turf_amount minus
+ * discount, so adding the discount back recovers turf_amount exactly.
+ */
+export function buildMergedItems(
+  bookings: MergeableBooking[],
+  sales: MergeableSale[],
+): MergedItemsResult {
+  const items: BillItem[] = [];
+  for (const b of bookings) {
+    const turfGross = b.turf_amount || b.total_amount + (Number(b.discount) || 0);
+    items.push({
+      item: `Turf · ${b.slot_name} (${b.booking_no})`,
+      qty: b.hours || 1,
+      rate: b.rate_per_hour || turfGross,
+      total: turfGross,
+      unit: "hr" as Unit,
+    });
+  }
+  for (const sale of sales)
+    for (const it of sale.items)
+      items.push({
+        item: it.item_name,
+        qty: it.qty,
+        rate: it.unit_price,
+        total: it.amount,
+        unit: "pcs" as Unit,
+      });
+
+  const subtotal = round2(items.reduce((s, i) => s + i.total, 0));
+  const discount = round2(bookings.reduce((s, b) => s + (Number(b.discount) || 0), 0));
+  const total = round2(Math.max(0, subtotal - discount));
+  return { items, subtotal, discount, total };
 }
 
 async function issueInvoiceNo() {
@@ -156,13 +267,16 @@ export async function mergeIntoBill(input: MergeInput): Promise<Bill> {
 
       const ledger = await db.tab_entries.toArray();
       const sources: (Source & { onTab: number })[] = [
-        ...bookings.map((b) => ({
-          kind: TAB_REF_TURF_BOOKING as typeof TAB_REF_TURF_BOOKING,
-          id: b.id,
-          label: b.booking_no,
-          collected: bookingCollected(b),
-          onTab: netTabAmountFor(ledger, TAB_REF_TURF_BOOKING, b.id),
-        })),
+        ...bookings.map((b) => {
+          const onTab = netTabAmountFor(ledger, TAB_REF_TURF_BOOKING, b.id);
+          return {
+            kind: TAB_REF_TURF_BOOKING as typeof TAB_REF_TURF_BOOKING,
+            id: b.id,
+            label: b.booking_no,
+            collected: bookingCollected(b, onTab),
+            onTab,
+          };
+        }),
         ...sales.map((s) => ({
           kind: TAB_REF_SNACK_SALE as typeof TAB_REF_SNACK_SALE,
           id: s.id,
@@ -172,7 +286,11 @@ export async function mergeIntoBill(input: MergeInput): Promise<Bill> {
         })),
       ];
 
-      const math = mergeMath(input.total, sources);
+      // Tax frozen at creation (see mergeTax / lib/biz.ts billGrossTotal), and
+      // the merge math runs on the tax-INCLUSIVE gross so the tab charge in
+      // step 2 matches the invoice's Balance due exactly.
+      const tax = mergeTax(input.total);
+      const math = mergeMath(tax.gross, sources);
       const billId = newId();
       const status: BillStatus =
         math.collected >= math.total && math.total > 0
@@ -189,7 +307,9 @@ export async function mergeIntoBill(input: MergeInput): Promise<Bill> {
         items: input.items as unknown as unknown[],
         subtotal: round2(input.subtotal),
         discount: round2(input.discount),
-        total: round2(input.total),
+        total: tax.taxable,
+        tax_amount: tax.taxAmount,
+        tax_lines: tax.taxLines,
         // Only money genuinely received. The rest, on an "On tab" bill, is a
         // tab charge — never counted here as collected revenue.
         amount_paid: math.collected,
@@ -315,7 +435,23 @@ export async function unmergeBill(billId: string, options: { deleteBill?: boolea
       // the ledger readable and makes a second un-merge a no-op.
       if (reversals.length) await db.tab_entries.bulkDelete(reversals.map((r) => r.id));
 
-      if (options.deleteBill) await db.bills.delete(billId);
+      if (options.deleteBill) {
+        await db.bills.delete(billId);
+      } else if (bill) {
+        // Un-merging without deleting still has to stop this bill from
+        // showing its own due — its sources just got their dues back above,
+        // so a bill that keeps claiming the same balance would double-count
+        // it (a customer owing ₹600 on the restored booking AND ₹600 on the
+        // orphaned bill for one real ₹600 due). `payment_mode: TAB_PAYMENT_MODE`
+        // is the exact flag `billDue()`/`billCollected()` already use to mean
+        // "this balance belongs elsewhere, not to this record" (see how a
+        // merged-onto-tab bill uses it) — reusing it here makes the bill's own
+        // due read as 0 while still correctly crediting it with only the cash
+        // it actually collected (bill.amount_paid, untouched), not the full
+        // total. The bill stays around as a historical record with no live
+        // due of its own.
+        await db.bills.update(billId, { payment_mode: TAB_PAYMENT_MODE });
+      }
     },
   );
 }

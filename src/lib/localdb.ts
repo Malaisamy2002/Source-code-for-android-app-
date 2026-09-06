@@ -24,6 +24,15 @@ export type BillRow = {
   subtotal: number;
   discount: number;
   total: number;
+  /**
+   * Tax frozen at bill creation (lib/biz.ts billGrossTotal). Rows created
+   * before this field existed leave it undefined; those legacy bills fall
+   * back to today's live tax settings (a documented limitation of pre-fix
+   * data), while every new bill reprints exactly as first issued even after
+   * the GST rate or toggle changes.
+   */
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
   amount_paid: number;
   status: string;
   payment_mode?: string | null;
@@ -60,6 +69,10 @@ export type TurfRateRow = {
   rate_30: number | null;
   rate_45: number | null;
   rate_60: number | null;
+  allow_15?: boolean;
+  allow_30?: boolean;
+  allow_45?: boolean;
+  allow_60?: boolean;
   is_active: boolean;
   created_at: string;
 };
@@ -99,6 +112,9 @@ export type TurfBookingRow = {
   hours: number;
   rate_per_hour: number;
   total_amount: number;
+  /** Tax frozen when the booking was saved (see lib/biz.ts TaxSnapshot). */
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
   advance_paid: number;
   payment_mode: string;
   status: string;
@@ -126,6 +142,9 @@ export type SnackSaleRow = {
   customer_name: string | null;
   items: unknown[];
   total: number;
+  /** Tax frozen when the sale was saved (see lib/biz.ts TaxSnapshot). */
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
   profit: number;
   payment_mode: string;
   notes: string | null;
@@ -203,9 +222,15 @@ export type TabEntryRow = {
    */
   source_ref_type?: string | null;
   source_ref_id?: string | null;
+  /** How a `payment` row was received (Cash/UPI/Card); null on charges and
+   * on rows saved before this field existed (treated as Cash). */
+  payment_mode?: string | null;
   entry_date: string;
   created_at: string;
 };
+
+/** Small key-value store for app-wide settings (e.g. enabled slot durations). */
+export type AppSettingRow = { key: string; value: unknown; updated_at: string };
 
 /** Receipt photos are kept as blobs in IndexedDB instead of cloud storage. */
 export type ReceiptRow = { path: string; blob: Blob; created_at: string };
@@ -230,6 +255,7 @@ class LedgerDB extends Dexie {
   counters!: Table<CounterRow, string>;
   customer_tabs!: Table<CustomerTabRow, string>;
   tab_entries!: Table<TabEntryRow, string>;
+  app_settings!: Table<AppSettingRow, string>;
 
   constructor() {
     super("turf-ledger");
@@ -277,6 +303,9 @@ class LedgerDB extends Dexie {
             if (s["merged_into_bill_id"] === undefined) s["merged_into_bill_id"] = null;
           });
       });
+
+    // v6 adds an app-wide key-value settings store (global slot durations, …).
+    this.version(6).stores({ app_settings: "key" });
   }
 }
 
@@ -298,6 +327,7 @@ export const DATA_TABLES = [
   "recurring_expenses",
   "customer_tabs",
   "tab_entries",
+  "app_settings",
 ] as const;
 
 export type DataTable = (typeof DATA_TABLES)[number];

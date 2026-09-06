@@ -10,16 +10,7 @@ import {
   Trophy,
   Settings,
   LayoutDashboard,
-  MoreHorizontal,
-  type LucideIcon,
 } from "lucide-react";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from "@/components/ui/sheet";
 import { DashboardTab } from "@/components/app/DashboardTab";
 import { SnacksTab } from "@/components/app/SnacksTab";
 import { BillsTab } from "@/components/app/BillsTab";
@@ -31,8 +22,12 @@ import { SettingsTab } from "@/components/app/SettingsTab";
 import { ArchiveYearDialog } from "@/components/app/ArchiveYearDialog";
 import { DesktopFirstRunNotice } from "@/components/app/DesktopFirstRunNotice";
 import { YearSwitcher } from "@/components/app/YearSwitcher";
+import { ScrollEdgeButton } from "@/components/app/ScrollEdgeButton";
+import { DataEntryShortcuts, ShortcutsHintButton } from "@/components/app/DataEntryShortcuts";
 import { BUSINESS_NAME } from "@/lib/biz";
 import { usePrintSettings } from "@/lib/print";
+import { usePersistedState } from "@/lib/ui-prefs";
+import { useLayoutPrefs, visibleTabIds } from "@/lib/layout-prefs";
 
 import { backupReminderDue, readAppSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
@@ -68,16 +63,38 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-// Android tab bar shows five destinations; the rest live behind "More".
-const PRIMARY_IDS: TabId[] = ["home", "turf", "snacks", "bills", "dues"];
-const PRIMARY_TABS = PRIMARY_IDS.map((id) => TABS.find((t) => t.id === id)!);
-const MORE_TABS = TABS.filter((t) => !PRIMARY_IDS.includes(t.id));
+const TAB_IDS = TABS.map((t) => t.id);
 
 function Index() {
-  const [tab, setTab] = useState<TabId>("home");
-  const [moreOpen, setMoreOpen] = useState(false);
+  const [tab, setTab] = usePersistedState<TabId>("active-tab", "home", (v) =>
+    (TAB_IDS as readonly string[]).includes(v),
+  );
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+  // Settings → "Arrange this app" leaves Settings and lands on Home, where the
+  // real cards are already framed by arrange mode.
+  useEffect(() => {
+    const onStart = () => setTab("home");
+    window.addEventListener("arrange:start", onStart);
+    return () => window.removeEventListener("arrange:start", onStart);
+  }, [setTab]);
+
   const { settings: printSettings } = usePrintSettings();
   const shopTitle = printSettings.shopName.trim() || BUSINESS_NAME;
+
+  // Tab bar follows Settings → Layout & arrangement: hidden tabs disappear and
+  // the rest keep the owner's chosen order. Settings itself can never be hidden.
+  const { layout } = useLayoutPrefs();
+  const visibleIds = visibleTabIds(layout);
+  const visibleTabs = visibleIds
+    .map((id) => TABS.find((t) => t.id === id))
+    .filter((t): t is (typeof TABS)[number] => Boolean(t));
+  const shownTabs = visibleTabs.length ? visibleTabs : TABS.slice();
+  const activeTab: TabId = shownTabs.some((t) => t.id === tab)
+    ? tab
+    : ((shownTabs[0]?.id ?? "settings") as TabId);
+  const navTabIds = shownTabs.map((t) => t.id);
+
 
   // One-time backup reminder, per the Settings → Backup frequency.
   useEffect(() => {
@@ -92,14 +109,20 @@ function Index() {
     return () => window.clearTimeout(t);
   }, []);
 
-  const inBar = PRIMARY_TABS.some((t) => t.id === tab);
-
   return (
-    <div className="min-h-screen bg-background pb-[calc(4.75rem+env(safe-area-inset-bottom))] md:pb-8">
+    <div className="min-h-screen bg-background pb-24 md:pb-8" data-density={layout.density}>
       <ArchiveYearDialog />
       <DesktopFirstRunNotice />
-      <header className="safe-top sticky top-0 z-20 border-b border-white/15 brand-gradient text-primary-foreground shadow-[0_10px_30px_-20px_oklch(0.4_0.1_250)] backdrop-blur-xl">
-        <div className="safe-x mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 md:flex md:justify-between md:gap-6 md:px-8">
+      <ScrollEdgeButton />
+      <ShortcutsHintButton onClick={() => setShortcutsOpen(true)} />
+      <DataEntryShortcuts
+        tabIds={navTabIds}
+        onGoToTab={(id) => setTab(id as TabId)}
+        helpOpen={shortcutsOpen}
+        onHelpOpenChange={setShortcutsOpen}
+      />
+      <header className="sticky top-0 z-20 border-b border-white/15 brand-gradient pt-[env(safe-area-inset-top)] text-primary-foreground shadow-[0_10px_30px_-20px_oklch(0.4_0.1_250)] backdrop-blur-xl">
+        <div className="mx-auto grid max-w-6xl grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 md:flex md:justify-between md:gap-6 md:px-8">
           <div className="flex min-w-0 items-center gap-3">
             <span className="grid size-10 shrink-0 place-items-center rounded-2xl border border-white/25 bg-white/15 backdrop-blur-md">
               <Trophy className="size-5" />
@@ -114,12 +137,14 @@ function Index() {
             </div>
           </div>
 
-          <YearSwitcher />
+          <div className="flex items-center gap-2">
+            <YearSwitcher />
+          </div>
 
           <nav className="hidden items-center gap-1 rounded-full border border-white/20 bg-white/10 p-1 backdrop-blur-md md:flex">
-            {TABS.map((t) => {
+            {shownTabs.map((t) => {
               const Icon = t.icon;
-              const active = tab === t.id;
+              const active = activeTab === t.id;
               return (
                 <button
                   key={t.id}
@@ -140,100 +165,44 @@ function Index() {
         </div>
       </header>
 
-      <main className="safe-x mx-auto max-w-2xl p-4 md:max-w-6xl md:px-8 md:py-8">
-        {tab === "home" && <DashboardTab />}
-        {tab === "turf" && <TurfTab />}
+      <main className="mx-auto max-w-2xl p-4 md:max-w-6xl md:px-8 md:py-8">
+        {activeTab === "home" && <DashboardTab />}
+        {activeTab === "turf" && <TurfTab />}
 
-        {tab === "snacks" && <SnacksTab />}
-        {tab === "bills" && <BillsTab />}
-        {tab === "money" && <ExpensesTab />}
-        {tab === "dues" && <DuesTab />}
-        {tab === "reports" && <ReportsTab />}
-        {tab === "settings" && <SettingsTab />}
+        {activeTab === "snacks" && <SnacksTab />}
+        {activeTab === "bills" && <BillsTab />}
+        {activeTab === "money" && <ExpensesTab />}
+        {activeTab === "dues" && <DuesTab />}
+        {activeTab === "reports" && <ReportsTab />}
+        {activeTab === "settings" && <SettingsTab />}
       </main>
 
-      {/* Android tab bar: five 48dp targets, no horizontal scrolling, overflow in a sheet. */}
-      <nav className="safe-bottom fixed inset-x-0 bottom-0 z-30 grid grid-cols-6 border-t bg-background/95 shadow-[0_-8px_24px_-18px_oklch(0.4_0.1_250)] backdrop-blur-xl md:hidden">
-        {PRIMARY_TABS.map((t) => (
-          <TabBarButton
-            key={t.id}
-            icon={t.icon}
-            label={t.label}
-            active={tab === t.id}
-            onClick={() => setTab(t.id)}
-          />
-        ))}
-
-        <Sheet open={moreOpen} onOpenChange={setMoreOpen}>
-          <SheetTrigger asChild>
-            <TabBarButton icon={MoreHorizontal} label="More" active={!inBar} />
-          </SheetTrigger>
-          <SheetContent side="bottom" className="safe-bottom rounded-t-3xl border-t px-4 pb-4">
-            <SheetHeader className="px-0 text-left">
-              <SheetTitle>More</SheetTitle>
-            </SheetHeader>
-            <div className="mt-2 grid grid-cols-3 gap-3">
-              {MORE_TABS.map((t) => {
-                const Icon = t.icon;
-                const active = tab === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    onClick={() => {
-                      setTab(t.id);
-                      setMoreOpen(false);
-                    }}
-                    className={cn(
-                      "tap flex flex-col items-center justify-center gap-2 rounded-2xl border p-4 text-xs font-semibold",
-                      active
-                        ? "border-primary/40 bg-primary/10 text-primary"
-                        : "border-border bg-card text-foreground",
-                    )}
-                  >
-                    <Icon className="h-6 w-6" />
-                    {t.label}
-                  </button>
-                );
-              })}
-            </div>
-          </SheetContent>
-        </Sheet>
+      <nav className="frost fixed inset-x-0 bottom-0 z-20 flex overflow-x-auto border-t pb-[env(safe-area-inset-bottom)] md:hidden">
+        {shownTabs.map((t) => {
+          const Icon = t.icon;
+          const active = activeTab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn(
+                "relative flex min-w-0 flex-1 flex-col items-center gap-1 whitespace-nowrap py-2.5 text-[11px] font-medium transition-colors",
+                active ? "text-primary" : "text-muted-foreground",
+              )}
+            >
+              <span
+                className={cn(
+                  "grid size-8 place-items-center rounded-full transition-all",
+                  active ? "bg-primary/12 shadow-[0_6px_16px_-10px_var(--primary)]" : "",
+                )}
+              >
+                <Icon className="h-5 w-5" />
+              </span>
+              {t.label}
+            </button>
+          );
+        })}
       </nav>
     </div>
-  );
-}
-
-function TabBarButton({
-  icon: Icon,
-  label,
-  active,
-  onClick,
-  ...rest
-}: {
-  icon: LucideIcon;
-  label: string;
-  active: boolean;
-  onClick?: () => void;
-} & React.ComponentPropsWithoutRef<"button">) {
-  return (
-    <button
-      {...rest}
-      onClick={onClick}
-      aria-current={active ? "page" : undefined}
-      className={cn(
-        "tap touch-target relative flex min-w-0 flex-col items-center justify-center gap-1 py-2 text-[11px] font-medium",
-        active ? "text-primary" : "text-muted-foreground",
-      )}
-    >
-      <span
-        className={cn(
-          "grid h-8 w-14 place-items-center rounded-full transition-all",
-          active ? "bg-primary/12 shadow-[0_6px_16px_-10px_var(--primary)]" : "",
-        )}
-      >
-        <Icon className="h-5 w-5" />
-      </span>
-      <span className="truncate">{label}</span>
-    </button>
   );
 }

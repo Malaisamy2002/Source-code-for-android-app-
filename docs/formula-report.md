@@ -4,9 +4,10 @@ Audit of every money formula in the app after money math was centralized on
 `src/lib/money.ts`. `R(x)` below means `rupees(x)` — whole rupee, half away
 from zero. Every figure the app shows, prints or exports is `R(...)`.
 
-Verified by: `bunx vitest run` (55 tests across `money`, `dues`, `merge`,
-`tabs`, `analytics`) and `bun scripts/verify-math.ts` (independent
-hand-computed two-month audit, all checks pass).
+Verified by: `bunx vitest run` (246 tests across 14 files — `money`, `dues`,
+`merge`, `tabs`, `analytics`, `expenses`, `print`, `receipt`, …) and
+`bun scripts/verify-math.ts` (independent hand-computed audit, sections 1-12,
+all checks pass).
 
 ---
 
@@ -105,7 +106,8 @@ turfRevenue   = Σ R(total_amount)                (unmerged, non-cancelled)
 snacksRevenue = Σ R(sale.total)                  (unmerged sales)
 netRevenue    = billsRevenue + turfRevenue + snacksRevenue
 revenue       = netRevenue + tax
-collected     = Σ billsCollected + Σ R(advance_paid) + Σ snackSaleCollected
+collected     = Σ billsCollected + Σ bookingCashCollected + Σ snackSaleCollected
+                + tabCollected                   ← NOT Σ R(advance_paid); see §9
 expenses      = Σ R(expense.amount)
 profit        = netRevenue - expenses            ← never revenue - expenses
 dues          = billsDues + Σ bookingDue
@@ -132,3 +134,53 @@ double-counted as a due; cancelled and merged records excluded everywhere.
 
 No other money formatter exists in the codebase (`toFixed` / manual
 `toLocaleString` remain only for percentages, colour math and record counts).
+
+## 9. Balance moved to dues — the same rupee, exactly once
+
+"Put balance on tab" settles a turf booking by writing
+`advance_paid = bookingGrossTotal(b)` while posting the remainder as a tab
+charge against that booking. Reading `advance_paid` as cash would count that
+rupee twice: once on the booking, and again as a tab payment when the customer
+settles on the Dues tab. A snack sale billed "On tab" has the same shape.
+
+```
+netTabAmountFor(entries, ref_type, ref_id)
+                     = max(0, Σ charge − Σ payment) for that source record
+bookingCashCollected(b, entries)
+                     = max(0, R(b.advance_paid) − netTabAmountFor(…, b.id))
+bookingDue(b, e)     = max(0, bookingGrossTotal(b) − R(advance_paid) − onTab)
+bookingMovedToDues   = no merge AND netTabAmountFor(…) > 0
+saleMovedToDues      = no merge AND (payment_mode = "On tab" OR netTab > 0)
+isTabCashPayment(e)  = kind = "payment" AND no ref_type
+                       (a payment WITH a ref_type is a merge/un-merge
+                        reversal — bookkeeping only, no cash moved)
+tabCollected         = Σ R(e.amount) for isTabCashPayment entries in period
+```
+
+Every "collected / received / paid" figure for a booking routes through
+`bookingCashCollected`: `periodStats.collected`, `paymentSplit`, the Turf tab
+row, the Reports turf-dues list, the Reports Excel "Advance paid" column, and
+the customer popup's booking rows.
+
+One deliberate exception: the Reports "Mark paid" button writes
+`advance_paid = stored paid + due` back to the record, so it keeps using the
+STORED figure — using cash-taken there would wipe out the balance already
+parked on the tab.
+
+Screens also label the state: a booking or snack sale whose money sits on the
+tab is faded and tagged "Moved to dues · D-…" (due number from
+`dueNoForRef`), showing the real cash taken, the amount now on dues, and a
+note pointing at the Dues tab.
+
+Worked example (verify-math §12, October): ₹1000 booking, ₹400 taken at the
+counter, ₹600 moved to dues, plus a ₹300 "On tab" snack sale.
+
+| Stage | collected | payment split |
+|---|---|---|
+| Dues open | ₹400 | Cash ₹400 |
+| ₹900 settled on Dues tab by UPI | ₹1300 | Cash ₹400 + UPI ₹900 |
+
+Never ₹1900. Regression cover: `dues.test.ts` (`bookingCashCollected`,
+`bookingMovedToDues` / `saleMovedToDues`), `analytics.test.ts`
+("no double counting when a balance moves to dues"), and
+`scripts/verify-math.ts` §12.

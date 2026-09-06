@@ -3,11 +3,31 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { billText, copyText, whatsappUrl, type Bill } from "@/lib/biz";
 import { downloadBillPdf, printBillPdf, shareBillPdf } from "@/lib/receipt";
+import { INVOICE_SECTIONS, type InvoiceSection } from "@/lib/desktop";
 
-export function BillActions({ bill }: { bill: Bill }) {
+export function BillActions({
+  bill,
+  section = INVOICE_SECTIONS.bills,
+  restricted = false,
+}: {
+  bill: Bill;
+  /** Which `Invoices/` subfolder this bill's saved files go in — pass
+   * "Merged" for bills produced by merging turf/snack records so they
+   * land separately from ordinary bills. Defaults to "Bills". */
+  section?: InvoiceSection;
+  /** True once the bill's balance has moved onto the customer's tab
+   * (greyed out in the list). Such bills are read-only everywhere except
+   * PDF download and Print — WhatsApp share and Copy are disabled since
+   * the bill text/number is no longer how this money gets collected. */
+  restricted?: boolean;
+}) {
   return (
     <div className="grid grid-cols-4 gap-2">
-      <Button variant="outline" className="lift h-11" onClick={() => downloadBillPdf(bill)}>
+      <Button
+        variant="outline"
+        className="lift h-11"
+        onClick={() => downloadBillPdf(bill, section)}
+      >
         <Download className="size-4" /> PDF
       </Button>
       <Button
@@ -15,7 +35,7 @@ export function BillActions({ bill }: { bill: Bill }) {
         className="lift h-11"
         aria-label="Print bill"
         title="Print"
-        onClick={() => printBillPdf(bill)}
+        onClick={() => printBillPdf(bill, section)}
       >
         <Printer className="size-4" /> Print
       </Button>
@@ -23,8 +43,13 @@ export function BillActions({ bill }: { bill: Bill }) {
         className="lift h-11"
         aria-label="Share on WhatsApp"
         title="Share on WhatsApp"
+        disabled={restricted}
         onClick={async () => {
-          const res = await shareBillPdf(bill, whatsappUrl(billText(bill), bill.customer_phone));
+          const res = await shareBillPdf(
+            bill,
+            whatsappUrl(billText(bill), bill.customer_phone),
+            section,
+          );
           if (res === "fallback") toast.info("PDF downloaded — attach it in WhatsApp");
         }}
       >
@@ -35,6 +60,7 @@ export function BillActions({ bill }: { bill: Bill }) {
         className="lift h-11"
         aria-label="Copy bill"
         title="Copy"
+        disabled={restricted}
         onClick={async () => {
           const ok = await copyText(billText(bill));
           if (ok) toast.success("Bill copied");

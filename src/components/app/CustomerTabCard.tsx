@@ -53,6 +53,7 @@ export function CustomerTabCard({ name, phone, autoDue = 0 }: Props) {
   const [dueBusiness, setDueBusiness] = useState<string>("Turf");
   const [dueNote, setDueNote] = useState("");
   const [payAmount, setPayAmount] = useState("");
+  const [payMode, setPayMode] = useState<"Cash" | "UPI">("Cash");
 
   const closed = tab?.status === "closed";
 
@@ -84,7 +85,15 @@ export function CustomerTabCard({ name, phone, autoDue = 0 }: Props) {
       return;
     }
     addEntry.mutate(
-      { name, phone, kind: "payment", business: "Shared", amount, note: "Payment received" },
+      {
+        name,
+        phone,
+        kind: "payment",
+        business: "Shared",
+        amount,
+        note: "Payment received",
+        payment_mode: payMode,
+      },
       {
         onSuccess: () => {
           setPayAmount("");
@@ -168,7 +177,7 @@ export function CustomerTabCard({ name, phone, autoDue = 0 }: Props) {
               </Button>
             </div>
 
-            <div className="grid gap-2 md:grid-cols-[6rem_auto_1fr] md:items-end">
+            <div className="grid gap-2 md:grid-cols-[6rem_7rem_auto_1fr] md:items-end">
               <div className="space-y-1">
                 <Label className="micro-label">Payment</Label>
                 <Input
@@ -177,6 +186,18 @@ export function CustomerTabCard({ name, phone, autoDue = 0 }: Props) {
                   onChange={(e) => setPayAmount(e.target.value)}
                   placeholder="₹0"
                 />
+              </div>
+              <div className="space-y-1">
+                <Label className="micro-label">Via</Label>
+                <Select value={payMode} onValueChange={(v) => setPayMode(v as "Cash" | "UPI")}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Cash">Cash</SelectItem>
+                    <SelectItem value="UPI">UPI</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
               <Button onClick={addPayment} disabled={balance <= 0 || addEntry.isPending}>
                 <Wallet className="mr-1 size-4" /> Collect
@@ -208,6 +229,7 @@ export function CustomerTabCard({ name, phone, autoDue = 0 }: Props) {
                   <span className="text-muted-foreground">
                     {" · "}
                     {e.kind === "charge" ? `Due · ${e.business}` : "Payment"}
+                    {e.kind === "payment" && e.payment_mode ? ` · ${e.payment_mode}` : ""}
                     {e.note ? ` · ${e.note}` : ""}
                   </span>
                 </span>
@@ -262,9 +284,9 @@ export function CustomerTabCard({ name, phone, autoDue = 0 }: Props) {
                 disabled={settle.isPending}
                 onClick={() =>
                   settle.mutate(
-                    { tabId: tab.id },
+                    { tabId: tab.id, payment_mode: payMode },
                     {
-                      onSuccess: () => toast.success("Settled and closed"),
+                      onSuccess: () => toast.success(`Settled via ${payMode} and closed`),
                       onError: (err) => toast.error(err.message),
                     },
                   )

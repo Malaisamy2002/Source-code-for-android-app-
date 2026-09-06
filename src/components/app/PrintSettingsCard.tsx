@@ -26,12 +26,14 @@ import {
   type LineSpacingId,
   type PaperId,
 } from "@/lib/print";
+import { formatDMY } from "@/lib/biz";
+import { dayKey } from "@/lib/analytics";
 import { buildReceiptPdf, printReceipt, type ReceiptDoc } from "@/lib/receipt";
 
 const sample: ReceiptDoc = {
   kind: "Sample",
   docNo: "TEST-001",
-  dateText: new Date().toISOString().slice(0, 10),
+  dateText: formatDMY(dayKey(new Date())),
   customer: "Test Customer",
   phone: "9876543210",
   lines: [
@@ -103,7 +105,7 @@ export function PrintSettingsCard() {
                   inputMode="numeric"
                   value={String(settings.customWidthMm)}
                   onChange={(e) =>
-                    set("customWidthMm", Math.max(30, Math.min(300, Number(e.target.value) || 72)))
+                    set("customWidthMm", Math.max(50, Math.min(300, Number(e.target.value) || 72)))
                   }
                   placeholder="e.g. 72"
                 />

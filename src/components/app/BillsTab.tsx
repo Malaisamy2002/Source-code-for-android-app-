@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, FileDown, Receipt, Users } from "lucide-react";
 import { exportToExcel } from "@/lib/xlsx";
+import { INVOICE_SECTIONS } from "@/lib/desktop";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,9 +26,9 @@ import {
   type BillStatus,
 } from "@/lib/biz";
 import { useBills, useDeleteBill, useUnmergeBill, useUpdateBill } from "@/lib/data";
-import { billDue, customerOutstanding } from "@/lib/dues";
+import { billDue, billMovedToDues, customerOutstanding, dueNoForRef } from "@/lib/dues";
 import { useSnackSales, useTurfBookings } from "@/lib/ops";
-import { useTabEntries } from "@/lib/tabs";
+import { TAB_REF_BILL, useTabEntries } from "@/lib/tabs";
 import { dayKey } from "@/lib/analytics";
 import { compareBy, sortSuffix, useSortState, type SortOption } from "@/lib/sort";
 import { BillActions } from "./BillActions";
@@ -38,6 +39,7 @@ import { CustomerDetailDialog } from "./CustomerDetailDialog";
 import { ConfirmDeleteButton } from "./ConfirmDeleteButton";
 import { SectionHeading } from "./SectionHeading";
 import { SortMenu } from "./SortMenu";
+import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
 
 type BillSortField = "date" | "customer" | "balance" | "total";
 
@@ -224,6 +226,7 @@ export function BillsTab() {
       billsToRows(bills.filter((b) => selected.includes(b.id))),
       "bills-selected",
       "Bills",
+      INVOICE_SECTIONS.bills,
     );
   };
 
@@ -241,7 +244,6 @@ export function BillsTab() {
     <div className="space-y-6">
       <SectionHeading eyebrow="BILLS & MONEY" title="Bills" icon={Receipt} />
 
-      <TodaySummaryCard />
       <MergeBillDialog />
       <CustomerDetailDialog
         name={openCustomer?.name ?? null}
@@ -249,18 +251,28 @@ export function BillsTab() {
         onOpenChange={(o) => !o && setOpenCustomer(null)}
       />
 
+      <LayoutSections tabId="bills" className="space-y-6">
+      <LayoutSection id="bills.today-summary">
+        <TodaySummaryCard />
+      </LayoutSection>
+
+      <LayoutSection id="bills.search-filter">
       <section className="space-y-3">
         <SectionHeading eyebrow="FILTER" title="Search & filter" />
         <Card className="frost">
           <CardContent className="space-y-3 pt-5">
+            <LayoutParts sectionId="bills.search-filter" className="space-y-3">
+            <LayoutPart id="bills.search-filter.search">
             <Input
               className="h-12"
               placeholder="Search customer or invoice no."
               value={q}
               onChange={(e) => setQ(e.target.value)}
+              data-shortcut="search"
             />
-            <div className="grid grid-cols-3 gap-2">
-              <div>
+            </LayoutPart>
+            <LayoutParts sectionId="bills.search-filter" className="grid grid-cols-3 gap-2">
+              <LayoutPart id="bills.search-filter.status">
                 <Label className="text-xs text-muted-foreground">Status</Label>
                 <Select value={status} onValueChange={(v) => setStatus(v as "all" | BillStatus)}>
                   <SelectTrigger className="h-11! w-full">
@@ -273,27 +285,34 @@ export function BillsTab() {
                     <SelectItem value="partial">Partial</SelectItem>
                   </SelectContent>
                 </Select>
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">From</Label>
-                <Input
-                  className="h-11"
-                  type="date"
-                  value={from}
-                  onChange={(e) => setFrom(e.target.value)}
-                />
-              </div>
-              <div>
-                <Label className="text-xs text-muted-foreground">To</Label>
-                <Input
-                  className="h-11"
-                  type="date"
-                  value={to}
-                  onChange={(e) => setTo(e.target.value)}
-                />
-              </div>
-            </div>
+              </LayoutPart>
+              <LayoutPart
+                id="bills.search-filter.date"
+                className="col-span-2 grid grid-cols-2 gap-2"
+              >
+                <div>
+                  <Label className="text-xs text-muted-foreground">From</Label>
+                  <Input
+                    className="h-11"
+                    type="date"
+                    value={from}
+                    onChange={(e) => setFrom(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-muted-foreground">To</Label>
+                  <Input
+                    className="h-11"
+                    type="date"
+                    value={to}
+                    onChange={(e) => setTo(e.target.value)}
+                  />
+                </div>
+              </LayoutPart>
+            </LayoutParts>
+            <LayoutPart id="bills.search-filter.sort" className="space-y-3">
             <div className="flex items-center justify-between gap-2">
+
               <Label className="text-xs text-muted-foreground">Sort by</Label>
               <SortMenu
                 options={BILL_SORT_OPTIONS}
@@ -311,20 +330,17 @@ export function BillsTab() {
                 <span>
                   Showing <span className="font-medium">{filtered.length}</span> invoice
                   {filtered.length === 1 ? "" : "s"} for{" "}
-                  <span className="font-medium">
-                    {new Date(`${pickedDate}T00:00:00`).toLocaleDateString("en-IN", {
-                      day: "numeric",
-                      month: "short",
-                      year: "numeric",
-                    })}
-                  </span>
+                  <span className="font-medium">{formatDMY(pickedDate)}</span>
                 </span>
                 <Button variant="ghost" size="sm" onClick={() => setPickedDate(undefined)}>
                   Clear
                 </Button>
               </div>
             )}
+            </LayoutPart>
+            <LayoutPart id="bills.search-filter.export">
             <Button
+
               variant="outline"
               className="h-11 w-full"
               onClick={() =>
@@ -343,17 +359,25 @@ export function BillsTab() {
                   })),
                   `bills-${sortSuffix(sort.field, sort.dir)}`,
                   "Bills",
+                  INVOICE_SECTIONS.bills,
                 )
               }
             >
               <FileDown className="size-4" /> Export to Excel
             </Button>
+            </LayoutPart>
+            </LayoutParts>
           </CardContent>
+
         </Card>
       </section>
+      </LayoutSection>
 
+      <LayoutSection id="bills.ledger">
       {ledger.length > 0 && (
         <section className="space-y-3">
+          <LayoutParts sectionId="bills.ledger" className="space-y-3">
+          <LayoutPart id="bills.ledger.heading">
           <SectionHeading
             eyebrow="LEDGER"
             title="Pending by customer"
@@ -368,6 +392,8 @@ export function BillsTab() {
               />
             }
           />
+          </LayoutPart>
+          <LayoutPart id="bills.ledger.table">
           <Card className="frost">
             <CardContent className="pt-5">
               <ul className="space-y-2">
@@ -393,13 +419,20 @@ export function BillsTab() {
               </ul>
             </CardContent>
           </Card>
+          </LayoutPart>
+          </LayoutParts>
         </section>
       )}
+      </LayoutSection>
 
+      <LayoutSection id="bills.list">
+      <>
       {filtered.length === 0 && (
         <p className="py-10 text-center text-sm text-muted-foreground">No bills yet.</p>
       )}
 
+      <LayoutParts sectionId="bills.list" className="space-y-6">
+      <LayoutPart id="bills.list.bulk">
       {selected.length > 0 && (
         <Card className="frost border-primary/40">
           <CardContent className="flex flex-wrap items-center gap-2 pt-5">
@@ -416,13 +449,25 @@ export function BillsTab() {
           </CardContent>
         </Card>
       )}
+      </LayoutPart>
 
+      <LayoutPart id="bills.list.heading">
+      {pageBills.length > 0 && <SectionHeading eyebrow="INVOICES" title="All bills" />}
+      </LayoutPart>
+
+      <LayoutPart id="bills.list.items" className="space-y-3">
       <section className="space-y-3">
-        {pageBills.length > 0 && <SectionHeading eyebrow="INVOICES" title="All bills" />}
-        {pageBills.map((bill) => (
+        {pageBills.map((bill) => {
+          const moved = billMovedToDues(bill, tabEntries);
+          const dueNo = moved
+            ? dueNoForRef(tabEntries, TAB_REF_BILL, bill.id, bill.invoice_no, bill.bill_date)
+            : null;
+          return (
           <Card
             key={bill.id}
-            className={isOverdue(bill) ? "lift border-destructive/50 bg-destructive/5" : "lift"}
+            className={`${isOverdue(bill) ? "lift border-destructive/50 bg-destructive/5" : "lift"} ${
+              moved ? "opacity-60 saturate-50" : ""
+            }`}
           >
             <CardContent className="space-y-3 pt-5">
               <div className="flex items-start justify-between gap-2">
@@ -431,6 +476,7 @@ export function BillsTab() {
                     className="mt-1"
                     aria-label="Select bill"
                     checked={selected.includes(bill.id)}
+                    disabled={moved}
                     onCheckedChange={() => toggleSelect(bill.id)}
                   />
                   <div>
@@ -459,7 +505,11 @@ export function BillsTab() {
                       Overdue
                     </Badge>
                   )}
-                  {bill.payment_mode === "On tab" && <Badge variant="secondary">On tab</Badge>}
+                  {moved && dueNo ? (
+                    <Badge variant="secondary">Moved to dues · {dueNo}</Badge>
+                  ) : (
+                    bill.payment_mode === "On tab" && <Badge variant="secondary">On tab</Badge>
+                  )}
                   {mergedBillIds.has(bill.id) && <Badge variant="outline">Merged</Badge>}
                 </div>
               </div>
@@ -501,13 +551,25 @@ export function BillsTab() {
               {bill.payment_mode && bill.status === "paid" && (
                 <p className="text-sm text-muted-foreground">Paid via {bill.payment_mode}</p>
               )}
-              <QuickPayRow bill={bill} />
-              <BillActions bill={bill} />
+              {moved ? (
+                <p className="frost-soft rounded-xl border px-3 py-2 text-xs text-muted-foreground">
+                  This bill's balance is on the customer's tab — collect it from the Dues tab.
+                </p>
+              ) : (
+                <QuickPayRow bill={bill} />
+              )}
+              <BillActions
+                bill={bill}
+                section={
+                  mergedBillIds.has(bill.id) ? INVOICE_SECTIONS.merged : INVOICE_SECTIONS.bills
+                }
+                restricted={moved}
+              />
               {mergedBillIds.has(bill.id) && (
                 <Button
                   variant="outline"
                   className="w-full"
-                  disabled={unmergeBillMut.isPending}
+                  disabled={moved || unmergeBillMut.isPending}
                   onClick={() =>
                     unmergeBillMut.mutate(bill.id, {
                       onSuccess: () =>
@@ -522,6 +584,7 @@ export function BillsTab() {
               <div className="flex gap-2">
                 <Select
                   value={bill.status}
+                  disabled={moved}
                   onValueChange={(v) => setPayment(bill, v as BillStatus)}
                 >
                   <SelectTrigger className="h-11! flex-1">
@@ -540,12 +603,14 @@ export function BillsTab() {
                   ariaLabel="Delete bill"
                   title={`Delete bill ${bill.invoice_no}?`}
                   description={`This permanently removes ${bill.invoice_no} for ${bill.customer_name} and can't be undone.`}
+                  disabled={moved}
                   onConfirm={() => deleteBill.mutate(bill.id)}
                 />
               </div>
             </CardContent>
           </Card>
-        ))}
+          );
+        })}
       </section>
 
       {filtered.length > PAGE_SIZE && (
@@ -571,6 +636,11 @@ export function BillsTab() {
           </Button>
         </div>
       )}
+      </LayoutPart>
+      </LayoutParts>
+      </>
+      </LayoutSection>
+      </LayoutSections>
     </div>
   );
 }

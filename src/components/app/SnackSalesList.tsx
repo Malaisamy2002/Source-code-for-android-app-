@@ -4,14 +4,19 @@ import { Download, Printer, ChevronLeft, ChevronRight, Receipt } from "lucide-re
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatDMY, money } from "@/lib/biz";
+import { rupees } from "@/lib/money";
 import { snackSaleReceipt, printReceipt, downloadReceipt } from "@/lib/receipt";
+import { INVOICE_SECTIONS } from "@/lib/desktop";
 import { exportToExcel } from "@/lib/xlsx";
 import { useDeleteSnackSale, useSnackSales } from "@/lib/ops";
-import { saleStateLabel } from "@/lib/dues";
+import { dueNoForRef, saleMovedToDues, saleStateLabel } from "@/lib/dues";
+import { TAB_REF_SNACK_SALE, useTabEntries } from "@/lib/tabs";
+import { cn } from "@/lib/utils";
 import { useBills } from "@/lib/data";
 import { Badge } from "@/components/ui/badge";
 import { compareBy, sortSuffix, useSortState, type SortOption } from "@/lib/sort";
 import { SectionHeading } from "@/components/app/SectionHeading";
+import { LayoutPart, LayoutParts } from "./LayoutSection";
 import { ConfirmDeleteButton } from "./ConfirmDeleteButton";
 import { SortMenu } from "./SortMenu";
 
@@ -30,6 +35,7 @@ export function SnackSalesList() {
   const { data: sales = [] } = useSnackSales();
   const del = useDeleteSnackSale();
   const { data: bills = [] } = useBills();
+  const { data: tabEntries = [] } = useTabEntries();
   const invoiceNoById = useMemo(() => new Map(bills.map((b) => [b.id, b.invoice_no])), [bills]);
 
   const sort = useSortState<SnackSaleSortField>("snack-sales", SNACK_SALE_SORT_OPTIONS, {
@@ -85,18 +91,21 @@ export function SnackSalesList() {
           Qty: it.qty,
           "Unit Price": it.unit_price,
           Amount: it.amount,
-          Profit: it.amount - it.qty * it.cost_price,
+          Profit: rupees(it.amount - it.qty * it.cost_price),
           "Payment Mode": s.payment_mode,
           Notes: s.notes ?? "",
         })),
       ),
       `snack-sales-${sortSuffix(sort.field, sort.dir)}`,
       "Snack Sales",
+      INVOICE_SECTIONS.snacks,
     );
 
   return (
     <Card>
       <CardContent className="space-y-4">
+        <LayoutParts sectionId="snacks.sales" className="space-y-4">
+        <LayoutPart id="snacks.sales.toolbar">
         <SectionHeading
           icon={Receipt}
           eyebrow="Bills"
@@ -119,18 +128,14 @@ export function SnackSalesList() {
             </div>
           }
         />
+        </LayoutPart>
+        <LayoutPart id="snacks.sales.list" className="space-y-4">
         {saleDate && (
           <div className="frost-soft flex items-center justify-between gap-2 rounded-xl border px-3 py-2 text-sm">
             <span>
               Showing <span className="font-medium">{dateFilteredSales.length}</span> snack bill
               {dateFilteredSales.length === 1 ? "" : "s"} for{" "}
-              <span className="font-medium">
-                {new Date(`${saleDate}T00:00:00`).toLocaleDateString("en-IN", {
-                  day: "numeric",
-                  month: "short",
-                  year: "numeric",
-                })}
-              </span>
+              <span className="font-medium">{formatDMY(saleDate)}</span>
             </span>
             <Button variant="ghost" size="sm" onClick={() => setSaleDate(undefined)}>
               Clear
@@ -138,8 +143,19 @@ export function SnackSalesList() {
           </div>
         )}
         {sales.length === 0 && <p className="text-sm text-muted-foreground">No snack bills yet.</p>}
-        {pageSales.map((s) => (
-          <div key={s.id} className="frost-soft lift rounded-xl border p-3 text-sm">
+        {pageSales.map((s) => {
+          const moved = saleMovedToDues(s, tabEntries);
+          const dueNo = moved
+            ? dueNoForRef(tabEntries, TAB_REF_SNACK_SALE, s.id, s.bill_no, s.sale_date)
+            : null;
+          return (
+          <div
+            key={s.id}
+            className={cn(
+              "frost-soft lift rounded-xl border p-3 text-sm",
+              moved && "opacity-60 saturate-50",
+            )}
+          >
             <div className="flex items-start justify-between gap-3">
               <div>
                 <p className="flex flex-wrap items-center gap-2 font-semibold">
@@ -147,17 +163,18 @@ export function SnackSalesList() {
                     {s.bill_no}
                     {s.customer_name ? ` · ${s.customer_name}` : ""}
                   </span>
-                  {(() => {
-                    const state = saleStateLabel(
-                      s,
-                      s.merged_into_bill_id ? invoiceNoById.get(s.merged_into_bill_id) : null,
-                    );
-                    return state ? (
-                      <Badge variant={s.merged_into_bill_id ? "outline" : "secondary"}>
-                        {state}
-                      </Badge>
-                    ) : null;
-                  })()}
+                  {moved ? (
+                    <Badge variant="secondary">Moved to dues · {dueNo}</Badge>
+                  ) : (
+                    (() => {
+                      const state = saleStateLabel(
+                        s,
+                        s.merged_into_bill_id ? invoiceNoById.get(s.merged_into_bill_id) : null,
+                      );
+                      return state ? <Badge variant="outline">{state}</Badge> : null;
+                    })()
+                  )}
+
                 </p>
                 <p className="text-muted-foreground">
                   {formatDMY(s.sale_date)} · {s.payment_mode}
@@ -173,6 +190,13 @@ export function SnackSalesList() {
                 <p className="mt-1 font-medium">
                   Total <span className="stat-value">{money(s.total)}</span>
                 </p>
+                {moved && (
+                  <p className="text-xs text-muted-foreground">
+                    On {s.customer_name || "the customer"}'s dues — collect it from the Dues tab so
+                    the same money isn't counted twice.
+                  </p>
+                )}
+
               </div>
               <div className="flex gap-1">
                 <Button
@@ -180,7 +204,9 @@ export function SnackSalesList() {
                   variant="outline"
                   aria-label="Print snack bill"
                   title="Print bill"
-                  onClick={() => printReceipt(snackSaleReceipt(s))}
+                  onClick={() =>
+                    printReceipt(snackSaleReceipt(s), undefined, INVOICE_SECTIONS.snacks)
+                  }
                 >
                   <Printer className="h-4 w-4" />
                 </Button>
@@ -189,7 +215,9 @@ export function SnackSalesList() {
                   variant="outline"
                   aria-label="Download snack bill"
                   title="Download PDF"
-                  onClick={() => downloadReceipt(snackSaleReceipt(s))}
+                  onClick={() =>
+                    downloadReceipt(snackSaleReceipt(s), undefined, INVOICE_SECTIONS.snacks)
+                  }
                 >
                   <Download className="h-4 w-4" />
                 </Button>
@@ -207,7 +235,9 @@ export function SnackSalesList() {
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
+
         {dateFilteredSales.length > PAGE_SIZE && (
           <div className="flex items-center justify-between pt-2">
             <Button
@@ -232,6 +262,8 @@ export function SnackSalesList() {
             </Button>
           </div>
         )}
+        </LayoutPart>
+        </LayoutParts>
       </CardContent>
     </Card>
   );

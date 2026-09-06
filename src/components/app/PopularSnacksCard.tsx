@@ -4,6 +4,7 @@ import { Bar, BarChart, Cell, ResponsiveContainer, XAxis, YAxis } from "recharts
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { SectionHeading } from "@/components/app/SectionHeading";
+import { LayoutPart, LayoutParts } from "./LayoutSection";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { money } from "@/lib/biz";
 import { useSnackSales } from "@/lib/ops";
@@ -44,6 +45,8 @@ export function PopularSnacksCard() {
   return (
     <Card>
       <CardContent className="space-y-4">
+        <LayoutParts sectionId="snacks.popular" className="space-y-4">
+        <LayoutPart id="snacks.popular.heading">
         <SectionHeading
           icon={TrendingUp}
           eyebrow="Insights"
@@ -64,6 +67,8 @@ export function PopularSnacksCard() {
             </div>
           }
         />
+        </LayoutPart>
+        <LayoutPart id="snacks.popular.chart">
         {top.length === 0 ? (
           <p className="text-sm text-muted-foreground">No snack sales in this period yet.</p>
         ) : (
@@ -112,6 +117,8 @@ export function PopularSnacksCard() {
             </ResponsiveContainer>
           </ChartContainer>
         )}
+        </LayoutPart>
+        </LayoutParts>
       </CardContent>
     </Card>
   );

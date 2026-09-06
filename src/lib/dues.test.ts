@@ -3,13 +3,19 @@ import { describe, expect, it } from "vitest";
 import {
   billCollected,
   billDue,
+  billMovedToDues,
+  bookingCashCollected,
   bookingDue,
+  bookingMovedToDues,
   bookingStateLabel,
   customerOutstanding,
+  dueNoFor,
+  dueNoForRef,
   groupTabLedger,
   isFinancialBooking,
   isFinancialSale,
   netTabAmountFor,
+  saleMovedToDues,
   saleStateLabel,
   snackSaleCollected,
 } from "./dues";
@@ -222,6 +228,42 @@ describe("customerOutstanding", () => {
   });
 });
 
+describe("due numbers", () => {
+  it("builds D-<moved date DDMMYY>-<original no>", () => {
+    expect(dueNoFor("INV-0007", "2026-09-05")).toBe("D-050926-INV-0007");
+  });
+
+  it("uses the earliest tab charge as the move date, else the record date", () => {
+    const entries = [
+      entry({
+        ref_type: TAB_REF_BILL,
+        ref_id: "b1",
+        amount: 500,
+        entry_date: "2026-09-05",
+      }),
+      entry({
+        ref_type: TAB_REF_BILL,
+        ref_id: "b1",
+        amount: 100,
+        entry_date: "2026-09-03",
+      }),
+    ];
+    expect(dueNoForRef(entries, TAB_REF_BILL, "b1", "INV-1", "2026-09-01")).toBe(
+      "D-030926-INV-1",
+    );
+    // No charge against the record → falls back to the record's own date.
+    expect(dueNoForRef([], TAB_REF_BILL, "b1", "INV-1", "2026-09-01")).toBe("D-010926-INV-1");
+  });
+
+  it("marks a bill whose balance sits on the tab as moved to dues", () => {
+    expect(billMovedToDues(bill({ amount_paid: 400 }))).toBe(false);
+    expect(billMovedToDues(bill({ payment_mode: "On tab", amount_paid: 300 }))).toBe(true);
+    const entries = [entry({ ref_type: TAB_REF_BILL, ref_id: "b1", amount: 1000 })];
+    expect(billMovedToDues(bill(), entries)).toBe(true);
+    expect(billMovedToDues(bill({ status: "paid", amount_paid: 1000 }))).toBe(false);
+  });
+});
+
 describe("groupTabLedger", () => {
   it("names one line per source record and nets payments", () => {
     const entries = [
@@ -239,6 +281,22 @@ describe("groupTabLedger", () => {
     expect(byLabel["Booking B-1"]).toBe(500);
     expect(byLabel["Snack bill S-1"]).toBe(200);
     expect(byLabel["Manual dues"]).toBe(100);
+  });
+
+  it("stamps record-backed lines with a due number; free lines get none", () => {
+    const entries = [
+      entry({
+        ref_type: TAB_REF_TURF_BOOKING,
+        ref_id: "k1",
+        amount: 800,
+        entry_date: "2026-09-05",
+      }),
+      entry({ amount: 100, note: "Ball damage" }),
+    ];
+    const groups = groupTabLedger(entries, { bookings: [booking()] });
+    const bookingGroup = groups.find((g) => g.refType === TAB_REF_TURF_BOOKING);
+    expect(bookingGroup?.dueNo).toBe("D-050926-B-1");
+    expect(groups.find((g) => g.refType === null)?.dueNo).toBeNull();
   });
 
   it("nets a merge reversal against the source it cancels", () => {
@@ -318,5 +376,76 @@ describe("invariant: every rupee is owed exactly once", () => {
     expect(dues.tab).toBe(0);
     expect(dues.bookings).toBe(0);
     expect(dues.total).toBe(0);
+  });
+});
+
+describe("bookingCashCollected", () => {
+  it("is the advance when nothing moved onto the tab", () => {
+    expect(bookingCashCollected(booking({ advance_paid: 300 }))).toBe(300);
+  });
+
+  it("strips out a balance parked on the tab (no double count)", () => {
+    // "Put balance on tab" writes advance_paid = gross AND posts the
+    // remainder as a tab charge. Real cash taken was only ₹300.
+    const entries = [entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", amount: 500 })];
+    expect(bookingCashCollected(booking({ advance_paid: 800 }), entries)).toBe(300);
+  });
+
+  it("stays net of the tab while a real dues payment is recorded", () => {
+    // A Dues-tab collection carries NO ref_type (isTabCashPayment), so it is
+    // counted once as tab cash and never re-credited to the booking.
+    const entries = [
+      entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", amount: 500 }),
+      entry({ kind: "payment", amount: 500 }),
+    ];
+    expect(bookingCashCollected(booking({ advance_paid: 800 }), entries)).toBe(300);
+  });
+
+  it("gives the charge back when a bookkeeping reversal pulls it off the tab", () => {
+    // A reversal (merge/un-merge) is a payment row WITH a ref_type: no cash
+    // moved, the tab no longer owns the balance, so the booking owns it again.
+    const entries = [
+      entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", amount: 500 }),
+      entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", kind: "payment", amount: 500 }),
+    ];
+    expect(bookingCashCollected(booking({ advance_paid: 800 }), entries)).toBe(800);
+  });
+
+  it("never goes negative", () => {
+    const entries = [entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", amount: 900 })];
+    expect(bookingCashCollected(booking({ advance_paid: 800 }), entries)).toBe(0);
+  });
+
+  it("ignores tab activity belonging to another booking", () => {
+    const entries = [entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "other", amount: 500 })];
+    expect(bookingCashCollected(booking({ advance_paid: 800 }), entries)).toBe(800);
+  });
+});
+
+describe("bookingMovedToDues / saleMovedToDues", () => {
+  it("flags a booking whose balance sits on the tab", () => {
+    const entries = [entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", amount: 500 })];
+    expect(bookingMovedToDues(booking(), entries)).toBe(true);
+    expect(bookingMovedToDues(booking())).toBe(false);
+  });
+
+  it("does not flag a merged booking, or one whose tab charge is settled", () => {
+    const entries = [entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", amount: 500 })];
+    expect(bookingMovedToDues(booking({ merged_into_bill_id: "b9" }), entries)).toBe(false);
+    expect(
+      bookingMovedToDues(booking(), [
+        ...entries,
+        entry({ ref_type: TAB_REF_TURF_BOOKING, ref_id: "k1", kind: "payment", amount: 500 }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("flags an 'On tab' snack sale and one charged to the tab", () => {
+    expect(saleMovedToDues(sale({ payment_mode: "On tab" }))).toBe(true);
+    expect(
+      saleMovedToDues(sale(), [entry({ ref_type: TAB_REF_SNACK_SALE, ref_id: "s1", amount: 200 })]),
+    ).toBe(true);
+    expect(saleMovedToDues(sale())).toBe(false);
+    expect(saleMovedToDues(sale({ payment_mode: "On tab", merged_into_bill_id: "b9" }))).toBe(false);
   });
 });

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { db, newId, nowIso, sortBy, type CustomerTabRow, type TabEntryRow } from "./localdb";
 import { rupees } from "./money";
+import { localDateStr } from "./utils";
 
 /**
  * Running customer tabs ("khata"): a per-customer ledger of dues added and
@@ -151,6 +152,7 @@ export type AddTabEntryInput = {
   ref_id?: string | null;
   source_ref_type?: string | null;
   source_ref_id?: string | null;
+  payment_mode?: string | null;
   entry_date?: string;
 };
 
@@ -178,7 +180,11 @@ export async function buildTabEntry(input: AddTabEntryInput): Promise<TabEntry> 
     ref_id: input.ref_id ?? null,
     source_ref_type: input.source_ref_type ?? null,
     source_ref_id: input.source_ref_id ?? null,
-    entry_date: input.entry_date || nowIso().slice(0, 10),
+    payment_mode: input.payment_mode ?? null,
+    // Local calendar day, NOT the UTC date: nowIso() is a UTC timestamp, so
+    // slicing it filed anything recorded between midnight and 5:30 am IST
+    // under the previous day.
+    entry_date: input.entry_date || localDateStr(),
     created_at: nowIso(),
   };
 }
@@ -233,7 +239,11 @@ export function useDeleteTabEntry() {
 export function useSettleAndCloseTab() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { tabId: string; note?: string | null }) => {
+    mutationFn: async (input: {
+      tabId: string;
+      note?: string | null;
+      payment_mode?: string | null;
+    }) => {
       await db.transaction("rw", db.customer_tabs, db.tab_entries, async () => {
         const tab = await db.customer_tabs.get(input.tabId);
         if (!tab) throw new Error("Tab not found");
@@ -250,7 +260,8 @@ export function useSettleAndCloseTab() {
             note: input.note?.trim() || "Final settlement",
             ref_type: null,
             ref_id: null,
-            entry_date: nowIso().slice(0, 10),
+            payment_mode: input.payment_mode ?? null,
+            entry_date: localDateStr(),
             created_at: nowIso(),
           });
         }

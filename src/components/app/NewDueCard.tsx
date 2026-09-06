@@ -6,6 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CustomerFields } from "@/components/app/CustomerFields";
+import { LayoutPart, LayoutParts } from "@/components/app/LayoutSection";
 import { TAB_BUSINESSES, useAddTabEntry } from "@/lib/tabs";
 import { money } from "@/lib/biz";
 import { cn, localDateStr } from "@/lib/utils";
@@ -51,7 +52,9 @@ export function NewDueCard() {
 
   return (
     <Card className="frost">
-      <CardContent className="space-y-4 pt-5">
+      <CardContent className="pt-5">
+        <LayoutParts sectionId="dues.new-due" className="space-y-4">
+        <LayoutPart id="dues.new-due.customer">
         <CustomerFields
           name={name}
           phone={phone}
@@ -60,8 +63,9 @@ export function NewDueCard() {
             setPhone(next.phone);
           }}
         />
+        </LayoutPart>
 
-        <div className="space-y-1.5">
+        <LayoutPart id="dues.new-due.business" className="space-y-1.5">
           <Label className="text-xs">Business</Label>
           <div className="flex gap-2">
             {TAB_BUSINESSES.map((b) => (
@@ -76,35 +80,34 @@ export function NewDueCard() {
               </Button>
             ))}
           </div>
-        </div>
+        </LayoutPart>
 
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1.5">
-            <Label className="text-xs">Amount</Label>
-            <Input
-              type="number"
-              inputMode="decimal"
-              min="0"
-              placeholder="0"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">Date</Label>
-            <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-          </div>
-        </div>
+        <LayoutPart id="dues.new-due.amount" className="space-y-1.5">
+          <Label className="text-xs">Amount</Label>
+          <Input
+            type="number"
+            inputMode="decimal"
+            min="0"
+            placeholder="0"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+        </LayoutPart>
+        <LayoutPart id="dues.new-due.date" className="space-y-1.5">
+          <Label className="text-xs">Date</Label>
+          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </LayoutPart>
 
-        <div className="space-y-1.5">
+        <LayoutPart id="dues.new-due.reason" className="space-y-1.5">
           <Label className="text-xs">Note (optional)</Label>
           <Input
             placeholder="What is this due for?"
             value={note}
             onChange={(e) => setNote(e.target.value)}
           />
-        </div>
+        </LayoutPart>
 
+        <LayoutPart id="dues.new-due.save" className="space-y-4">
         <Button className="w-full" disabled={!canSave} onClick={save}>
           <PlusCircle className="mr-1 size-4" />
           Add due {value > 0 ? money(value) : ""}
@@ -113,6 +116,8 @@ export function NewDueCard() {
           Dues on bills and turf bookings are collected from those tabs — only add manual dues here
           so the same amount is never owed twice.
         </p>
+        </LayoutPart>
+        </LayoutParts>
       </CardContent>
     </Card>
   );

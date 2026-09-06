@@ -35,6 +35,9 @@ export type Bill = {
   subtotal: number;
   discount: number;
   total: number;
+  /** Tax snapshot taken when the bill was created (see billGrossTotal). */
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
   amount_paid: number;
   status: BillStatus;
   payment_mode?: string | null;
@@ -70,16 +73,6 @@ export const rowTotal = (r: Pick<CalcRow, "rate" | "qty">) =>
 
 export { money };
 
-export const shortDate = (iso: string) =>
-  new Date(iso).toLocaleString("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  });
-
 /**
  * Bill/booking/snack-sale display date as "DD-MM-YYYY" — the one format
  * every printed bill, booking receipt, and snack-sale receipt (plus their
@@ -104,6 +97,20 @@ export const formatDMY = (iso: string): string => {
   const day = String(d.getDate()).padStart(2, "0");
   const month = String(d.getMonth() + 1).padStart(2, "0");
   return `${day}-${month}-${d.getFullYear()}`;
+};
+
+/** Same DD-MM-YYYY convention as formatDMY, with a time-of-day suffix for
+ * timestamped log entries (Calc history, expense records) where the time
+ * matters and not just the day. */
+export const shortDate = (iso: string) => {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const time = d.toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  });
+  return `${formatDMY(iso)}, ${time}`;
 };
 
 export function historyEntryText(entry: HistoryEntry) {
@@ -171,9 +178,95 @@ export function balanceOf(bill: Bill) {
  * always applied BEFORE tax). Always a whole rupee. */
 export function billGrossTotal(bill: Bill): number {
   const taxable = rupees(bill.total);
-  const { taxAmount } = taxBreakdown(taxable, readAppSettings());
-  return taxable + taxAmount;
+  // The rate that applies to an invoice is the one in effect when it was
+  // created: a later GST change must not move an issued bill's Grand Total,
+  // Paid or Balance Due, and a reprint must match the customer's copy. New
+  // bills carry that frozen figure; only legacy rows saved before the
+  // snapshot existed fall back to the live settings.
+  return grossWithTax(taxable, bill);
 }
+
+/** Tax lines to print for a bill — the frozen snapshot when present, else a
+ * live recompute for legacy pre-snapshot rows. */
+export function billTaxLines(bill: Bill): { label: string; value: number }[] {
+  return taxLinesWithFallback(bill.total, bill);
+}
+
+/**
+ * A record's frozen tax, or a live recompute for legacy rows.
+ *
+ * Every money document in the app (bill, turf booking, snack sale) stores the
+ * tax that applied when it was created, so a later GST rate/toggle change can
+ * never move an issued document's total or its reprint. Rows saved before the
+ * snapshot existed have no `tax_amount`, and keep the old live-recompute
+ * behaviour (documented limitation of pre-fix data).
+ */
+export type TaxSnapshot = {
+  tax_amount?: number;
+  tax_lines?: { label: string; value: number }[];
+};
+
+/** Compute (and freeze) tax on a taxable amount — discount already deducted. */
+export function freezeTax(
+  taxable: number,
+  s: Parameters<typeof taxBreakdown>[1] = readAppSettings(),
+) {
+  const base = rupees(taxable);
+  const { taxAmount, lines } = taxBreakdown(base, s);
+  return { taxable: base, taxAmount, taxLines: lines, gross: base + taxAmount };
+}
+
+/** Tax-inclusive total for any record with a taxable amount + tax snapshot. */
+export function grossWithTax(taxable: number, rec: TaxSnapshot): number {
+  const base = rupees(taxable);
+  if (typeof rec.tax_amount === "number") return base + rupees(rec.tax_amount);
+  return base + taxBreakdown(base, readAppSettings()).taxAmount;
+}
+
+/** Tax lines to print for any record — frozen when present, else live. */
+export function taxLinesWithFallback(
+  taxable: number,
+  rec: TaxSnapshot,
+): { label: string; value: number }[] {
+  if (rec.tax_lines) return rec.tax_lines;
+  if (typeof rec.tax_amount === "number") return [];
+  return taxBreakdown(rupees(taxable), readAppSettings()).lines;
+}
+
+/** A turf booking's taxable (post-discount, pre-tax) amount. */
+export const bookingTaxable = (
+  b: Pick<TurfBooking_, "turf_amount" | "hours" | "rate_per_hour" | "courts"> & {
+    snacks_total?: number;
+    discount?: number;
+    total_amount?: number;
+  },
+): number => {
+  // Turf + snacks - discount, recomputed from the parts so a stale
+  // total_amount can't understate the bill; total_amount is the fallback for
+  // rows that carry no slot/snacks detail.
+  const courts = b.courts ?? 1;
+  const turf = b.turf_amount || (b.hours ?? 0) * (b.rate_per_hour ?? 0) * courts;
+  const derived = turf + (b.snacks_total ?? 0) - (b.discount ?? 0);
+  if (derived > 0) return rupees(derived);
+  return Math.max(0, rupees(b.total_amount ?? 0));
+};
+
+/** Structural shape of the booking fields these helpers need (avoids a
+ * lib/ops.ts import cycle). */
+type TurfBooking_ = {
+  turf_amount: number;
+  hours: number;
+  rate_per_hour: number;
+  courts: number;
+};
+
+/** A booking's tax-inclusive grand total — the figure its receipt prints. */
+export const bookingGrossTotal = (b: Parameters<typeof bookingTaxable>[0] & TaxSnapshot): number =>
+  grossWithTax(bookingTaxable(b), b);
+
+/** A snack sale's tax-inclusive grand total — the figure its receipt prints. */
+export const snackSaleGrossTotal = (s: { total: number } & TaxSnapshot): number =>
+  grossWithTax(s.total, s);
 
 /** What's actually been paid toward a bill's tax-inclusive total — full
  * gross amount once marked "paid", otherwise whatever's been recorded. */

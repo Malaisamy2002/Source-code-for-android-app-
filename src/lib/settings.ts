@@ -14,6 +14,17 @@ export type CustomTax = {
 };
 
 export type AppSettings = {
+  /**
+   * Master switch for charging GST. SCOPE: when on, GST (and any enabled
+   * custom tax) is added to EVERY money document — formal Bills, Turf booking
+   * receipts and Snacks-only receipts alike — and every "on tab" charge posts
+   * the same tax-inclusive grand total the receipt printed.
+   *
+   * The rate that applies is frozen on each document when it is created
+   * (tax_amount / tax_lines), so changing gstEnabled or gstRate later only
+   * affects NEW documents; already-issued receipts and their reprints never
+   * move. Rows saved before that snapshot existed fall back to the live rate.
+   */
   gstEnabled: boolean;
   gstRate: number;
   /** Independent print switch: shows the GSTIN line on bills. Separate from

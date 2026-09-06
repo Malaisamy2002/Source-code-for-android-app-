@@ -1,10 +1,29 @@
 import { jsPDF } from "jspdf";
-import { BUSINESS_NAME, billGrossTotal, billPaidAmount, formatDMY, money, type Bill } from "./biz";
-import { isDesktop, isMobileShell, openExternal, saveFile } from "./desktop";
+import { toast } from "sonner";
+import {
+  BUSINESS_NAME,
+  billGrossTotal,
+  bookingGrossTotal,
+  bookingTaxable,
+  snackSaleGrossTotal,
+  taxLinesWithFallback,
+  billPaidAmount,
+  billTaxLines,
+  formatDMY,
+  money,
+  type Bill,
+} from "./biz";
+import {
+  isDesktop,
+  openExternal,
+  revealInFolder,
+  saveToInvoicesFolder,
+  type InvoiceSection,
+} from "./desktop";
 import { rupees } from "./money";
 import type { SnackSale, TurfBooking } from "./ops";
 import { paperInfo, paperWidthMm, readPrintSettings, type PrintSettings } from "./print";
-import { readAppSettings, taxBreakdown } from "./settings";
+import { readAppSettings } from "./settings";
 
 /** PDF-safe money: helvetica has no rupee glyph, and receipts drop paise.
  *  Handles negative amounts (used for the "Advance paid" / "Offer" line
@@ -107,47 +126,22 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
   // to size already.
   const cutFeedMm = wide ? 0 : Math.max(0, Math.min(40, s.cutFeedMm || 0));
 
-  // The shop address/phone lines are optional header rows added after the
-  // original height baseline was written, so their space has to be added or a
-  // long address overflows the generated roll page. The address wraps to the
-  // printable width, so estimate its line count from the average helvetica
-  // glyph width (~0.5 em) at the header font size.
-  const headerFontMm = (wide ? 9 : 7) * scale * 0.3528;
-  const charsPerLine = Math.max(8, Math.floor((width - marginX * 2) / (headerFontMm * 0.5)));
-  const address = s.shopAddress.trim();
-  // Address/phone text lines are baked into the roll-header artwork when
-  // it's shown, so they aren't drawn (or budgeted for) separately.
-  const addressLines =
-    !showRollHeader && address
-      ? address
-          .split(/\r?\n/)
-          .reduce((n, part) => n + Math.max(1, Math.ceil(part.length / charsPerLine)), 0)
-      : 0;
-  const phoneLines = !showRollHeader && s.shopPhone.trim() ? 1 : 0;
-  // +1 line of slack, since the estimate is character-count based.
-  const headerExtraH = (addressLines + phoneLines) * lineH + (addressLines ? lineH : 0);
-
-  // The "95" baseline below was calibrated for the plain-text header (start
-  // margin + shop name + tagline + rule + doc-info block + item header row +
-  // closing rules + footer line, with some safety slack for longer text).
-  // The roll-header artwork replaces all of that text, and already includes
-  // its own top/bottom padding, so reusing the full text baseline on top of
-  // the image's own height would double-count and print a lot of wasted
-  // blank paper below the receipt. A much smaller baseline (just the doc-info
-  // block, item header, closing rules and footer line, plus a little slack)
-  // is enough once the header artwork's own height is added separately.
-  const height = wide
-    ? paper.heightMm!
-    : (showRollHeader ? 36 : 112) +
-      doc.lines.length * lineH * 2 +
-      doc.totals.length * lineH +
-      extraBrandH +
-      (showRollHeader ? rollHeaderH + 2 : 0) +
-      headerExtraH +
-      cutFeedMm;
-
-  const pdf = new jsPDF({ unit: "mm", format: [width, height] });
-  let y = wide ? 16 : 10;
+  // Previously this estimated the page height up front (address line-wrap
+  // guesses, a flat per-item line count, etc.) and built the PDF straight to
+  // that guess. Any mismatch between the guess and what actually gets drawn
+  // shows up as a permanent blank gap at the bottom of the roll — worse the
+  // longer the bill, since guesses compound (a slightly-off address-wrap
+  // estimate, GSTIN/FSSAI lines not being budgeted, the 0.6mm-per-row
+  // rounding in every left()/row()/field()/itemRow() call, etc.). Sheet
+  // paper doesn't have this problem (A4/A5/Letter are already a fixed
+  // physical size), but roll paper's whole point is a page exactly as long
+  // as the receipt — so instead of estimating, `renderBody` below is run
+  // once on a generously tall scratch page purely to measure the real final
+  // `y`, then run again on a page built to that exact measured height. Two
+  // passes of the same deterministic drawing code, not two different
+  // formulas, so there is nothing left to under- or over-shoot.
+  const renderBody = (pdf: jsPDF, pageHeightMm: number): number => {
+    let y = wide ? 16 : 10;
 
   // Body font sizes (doc-info block, item rows, totals) scale with the paper
   // kind the same way the header text does, so a sheet printout doesn't end
@@ -177,16 +171,37 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
     const lines = pdf.splitTextToSize(text, maxW) as string[];
     for (const line of lines) center(line, fitSize, bold);
   };
+  // Shrinks `text` (with the CURRENT font/size already applied) down to fit
+  // `maxW` mm by dropping trailing characters and adding "…", instead of
+  // letting it run past the printable edge or into a neighbouring column.
+  // Must be called only after pdf.setFont/setFontSize for this text, since
+  // getTextWidth measures against whatever font is currently active.
+  const fitToWidth = (text: string, maxW: number) => {
+    const safeMaxW = Math.max(4, maxW);
+    if (pdf.getTextWidth(text) <= safeMaxW) return text;
+    let t = text;
+    while (t.length > 1 && pdf.getTextWidth(`${t}…`) > safeMaxW) t = t.slice(0, -1);
+    return `${t}…`;
+  };
   const left = (text: string, size = bodyFont, bold = false) => {
     pdf.setFont("helvetica", bold ? "bold" : "normal");
     pdf.setFontSize(size * scale);
-    pdf.text(text, marginX, y);
+    // Every `left()` caller (the item sub-line, the note) prints across the
+    // full printable width with nothing after it, so clip instead of letting
+    // a long line run off the sheet/roll edge.
+    pdf.text(fitToWidth(text, width - marginX * 2), marginX, y);
     y += lineH - 0.6;
   };
   const row = (l: string, r: string, bold = false) => {
     pdf.setFont("helvetica", bold ? "bold" : "normal");
     pdf.setFontSize(bodyFont * scale);
-    pdf.text(l, marginX, y);
+    // A long label (e.g. a custom tax name) could otherwise run straight
+    // into the right-aligned value — clamp it to whatever room is actually
+    // left once the value's own width is measured, same guard itemRow()
+    // already applies to item labels vs. the qty/amount columns.
+    const rW = pdf.getTextWidth(r);
+    const maxLabelW = Math.max(6, width - marginX * 2 - rW - 1.5);
+    pdf.text(fitToWidth(l, maxLabelW), marginX, y);
     pdf.text(r, width - marginX, y, { align: "right" });
     y += lineH - 0.6;
   };
@@ -213,7 +228,12 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
     pdf.setFontSize(size * scale);
     pdf.text(label, marginX, y);
     pdf.setFont("helvetica", bold ? "bold" : "normal");
-    pdf.text(`: ${value}`, marginX + labelColW, y);
+    // Long values (a long customer name/email, or a due number like
+    // "D-050926-INV-0007") previously had nothing stopping them running
+    // past the paper's right edge, worst on narrow rolls — clip with an
+    // ellipsis the same way every other value-drawing helper here does.
+    const availW = Math.max(6, width - marginX - (marginX + labelColW));
+    pdf.text(fitToWidth(`: ${value}`, availW), marginX + labelColW, y);
     y += lineH - 0.6;
   };
   // Item table columns: "#" | item (+ optional smaller sub-line) | qty | amount.
@@ -221,16 +241,147 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
   // own text (it right-aligns flush to the edge and grows leftward), so the
   // qty column's right edge has to sit further in than that — otherwise
   // "QTY" and "AMOUNT" (or a wide amount value) print on top of each other.
-  const noColW = wide ? 9 : 7;
-  const qtyColW = wide ? 26 : 19;
+  // Both scale with `scale` (the Text-size setting) so a bigger font gets
+  // proportionally more room instead of the same fixed mm gap shrinking
+  // relative to the now-larger glyphs — that mismatch is what let "Large"/
+  // "Extra large" text run into the qty column on narrow paper.
+  const noColW = (wide ? 9 : 7) * scale;
+  const qtyColW = (wide ? 26 : 19) * scale;
   const itemRow = (no: string, label: string, qty: string, amount: string, bold = false) => {
     pdf.setFont("helvetica", bold ? "bold" : "normal");
     pdf.setFontSize(bodyFont * scale);
+    const qtyX = width - marginX - qtyColW;
+    // Available room for the item label before it would run into the qty
+    // column. Measures the qty/amount strings themselves (not just the
+    // nominal column width) since a long qty/amount value eats further into
+    // that gap — clamped to a small positive floor so an extreme combo
+    // (50 mm roll + "Extra large" text) still prints a truncated
+    // label instead of a negative-width no-op.
+    const qtyW = pdf.getTextWidth(qty);
+    const amountW = pdf.getTextWidth(amount);
+    const rightEdge = Math.min(qtyX - qtyW, width - marginX - amountW);
+    const labelMaxW = Math.max(6, rightEdge - (marginX + noColW) - 1.5);
+    // Wrap the label onto up to 2 lines instead of clipping mid-text —
+    // clipping used to cut booking time ranges ("06:00-07:…") in half on
+    // narrow 80 mm rolls. Only a label that still overflows 2 full lines
+    // falls back to the ellipsis.
+    const wrapped = pdf.splitTextToSize(label, labelMaxW) as string[];
+    const labelLines =
+      wrapped.length <= 2
+        ? wrapped
+        : [wrapped[0] ?? "", fitToWidth(wrapped.slice(1).join(" "), labelMaxW)];
     pdf.text(no, marginX, y);
-    pdf.text(label, marginX + noColW, y);
-    pdf.text(qty, width - marginX - qtyColW, y, { align: "right" });
+    pdf.text(labelLines[0] ?? "", marginX + noColW, y);
+    pdf.text(qty, qtyX, y, { align: "right" });
     pdf.text(amount, width - marginX, y, { align: "right" });
     y += lineH - 0.6;
+    for (let li = 1; li < labelLines.length; li++) {
+      pdf.text(labelLines[li] ?? "", marginX + noColW, y);
+      y += lineH - 0.6;
+    }
+  };
+
+  // Sheet-only (A5/A4/Letter) bordered item table — thermal rolls keep the
+  // plain itemRow() above unchanged (bordered fills don't suit POS paper or
+  // ink, and matches how real receipts look). Sheets get the header-shaded,
+  // row-ruled table that invoice generators (Zoho/QuickBooks/FreshBooks/
+  // Wave-style) use: right-aligned numeric columns, a tinted header row, and
+  // a light zebra tint on alternating rows so long item lists stay scannable.
+  // Reuses the same column geometry (noColW/qtyColW) as itemRow so the
+  // header and totals block below stay aligned with the columns above them.
+  const TABLE_HEADER_FILL: [number, number, number] = [223, 240, 231];
+  const TABLE_HEADER_TEXT: [number, number, number] = [21, 105, 60];
+  const TABLE_ZEBRA_FILL: [number, number, number] = [246, 248, 247];
+  const TABLE_RULE = 205;
+  const sheetItemTable = (lines: ReceiptLine[]) => {
+    const qtyX = width - marginX - qtyColW;
+    const labelX = marginX + noColW;
+    const labelColW = Math.max(10, qtyX - labelX - 2);
+    const rowLineH = lineH - 0.6;
+    // Every band (the header, then each item row) is laid out the same
+    // way: `topPad` mm from the band's top edge up to its first text
+    // baseline, `bottomPad` mm from its last baseline down to its bottom
+    // edge. Each band's bottom edge is used, unmodified, as the next
+    // band's top edge (`nextBaseline` below) — so the shaded header, the
+    // alternating row tints and the divider rules always stack with zero
+    // gap and zero overlap, instead of being computed independently and
+    // risking one band's fill painting over the previous band's rule.
+    const topPad = 1.8;
+    const bottomPad = 1.3;
+
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(bodyFont * scale);
+    // Wrap each label to at most 2 lines against the real column width
+    // (rather than the full-page fitToWidth clipping itemRow uses) so a long
+    // item name reads in full instead of ending in "…" whenever two short
+    // lines would do.
+    const rows = lines.map((it) => ({
+      it,
+      labelLines: (pdf.splitTextToSize(it.label || "", labelColW) as string[]).slice(0, 2),
+    }));
+
+    // Header band.
+    const headerBaseline = y;
+    const headerTop = headerBaseline - topPad;
+    const headerBottom = headerBaseline + bottomPad;
+    pdf.setFillColor(...TABLE_HEADER_FILL);
+    pdf.rect(marginX, headerTop, width - marginX * 2, headerBottom - headerTop, "F");
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(bodyFont * scale);
+    pdf.setTextColor(...TABLE_HEADER_TEXT);
+    pdf.text("#", marginX + 1, headerBaseline);
+    pdf.text("ITEM", labelX, headerBaseline);
+    pdf.text("QTY", qtyX, headerBaseline, { align: "right" });
+    pdf.text("AMOUNT", width - marginX, headerBaseline, { align: "right" });
+    pdf.setTextColor(shade);
+    pdf.setDrawColor(TABLE_RULE);
+    pdf.line(marginX, headerBottom, width - marginX, headerBottom);
+
+    // Baseline the next band (first item row, then each row after) will
+    // draw its first line of text on.
+    let nextBaseline = headerBottom + topPad;
+
+    rows.forEach(({ it, labelLines }, i) => {
+      const lineCount = Math.max(1, labelLines.length);
+      const firstBaseline = nextBaseline;
+      const lastLabelBaseline = firstBaseline + (lineCount - 1) * rowLineH;
+      // The optional smaller "sub" line (e.g. a rate breakdown) sits closer
+      // to the line above it than a full row-height gap, matching how it's
+      // drawn on thermal receipts today.
+      const subBaseline = it.sub ? lastLabelBaseline + rowLineH * 0.85 : null;
+      const lastBaseline = subBaseline ?? lastLabelBaseline;
+      const bandTop = firstBaseline - topPad;
+      const bandBottom = lastBaseline + bottomPad;
+
+      if (i % 2 === 1) {
+        pdf.setFillColor(...TABLE_ZEBRA_FILL);
+        pdf.rect(marginX, bandTop, width - marginX * 2, bandBottom - bandTop, "F");
+      }
+
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(bodyFont * scale);
+      pdf.setTextColor(shade);
+      pdf.text(String(i + 1), marginX + 1, firstBaseline);
+      labelLines.forEach((line, li) => pdf.text(line, labelX, firstBaseline + li * rowLineH));
+      const qty = it.qty !== undefined ? String(it.qty) : "";
+      pdf.text(qty, qtyX, firstBaseline, { align: "right" });
+      pdf.text(pmoney(it.amount ?? 0), width - marginX, firstBaseline, { align: "right" });
+      if (it.sub && subBaseline !== null) {
+        pdf.setFontSize((wide ? 9 : 7) * scale);
+        pdf.text(fitToWidth(`   ${it.sub}`, labelColW), labelX, subBaseline);
+        pdf.setFontSize(bodyFont * scale);
+      }
+
+      pdf.setDrawColor(TABLE_RULE);
+      pdf.line(marginX, bandBottom, width - marginX, bandBottom);
+      nextBaseline = bandBottom + topPad;
+    });
+
+    // Hand off exactly like itemRow's loop does: `y` left at the next fresh
+    // baseline, so the caller's own `y += 1; rule();` right after this call
+    // lands in the gap below the table's own closing rule instead of
+    // through the last row's text.
+    y = nextBaseline;
   };
 
   if (showFullBackground && s.background) {
@@ -238,7 +389,7 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
     // already carries the logo, business name, tagline, address, phone and
     // footer band, so everything below skips straight to the blank zone the
     // letterhead was designed to leave for the bill's own content.
-    pdf.addImage(s.background.dataUrl, imgFormat(s.background.dataUrl), 0, 0, width, height);
+    pdf.addImage(s.background.dataUrl, imgFormat(s.background.dataUrl), 0, 0, width, pageHeightMm);
     y = A4_BACKGROUND_CONTENT_TOP_MM;
   } else if (showBanner && s.banner) {
     const maxW = width - marginX * 2;
@@ -334,17 +485,24 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
   field(`${doc.kind} No.`, doc.docNo);
   y += 1;
   rule();
-  itemRow("#", "ITEM", "QTY", "AMOUNT", true);
-  y += 1;
-  doc.lines.forEach((it, i) => {
-    itemRow(
-      String(i + 1),
-      it.label,
-      it.qty !== undefined ? String(it.qty) : "",
-      pmoney(it.amount ?? 0),
-    );
-    if (it.sub) left(`   ${it.sub}`, wide ? 9 : 7, false);
-  });
+  if (wide) {
+    // A5/A4/Letter: bordered, header-shaded table (see sheetItemTable above).
+    y += 1;
+    sheetItemTable(doc.lines);
+  } else {
+    // Thermal rolls: plain ruled columns, unchanged from before.
+    itemRow("#", "ITEM", "QTY", "AMOUNT", true);
+    y += 1;
+    doc.lines.forEach((it, i) => {
+      itemRow(
+        String(i + 1),
+        it.label,
+        it.qty !== undefined ? String(it.qty) : "",
+        pmoney(it.amount ?? 0),
+      );
+      if (it.sub) left(`   ${it.sub}`, wide ? 9 : 7, false);
+    });
+  }
   y += 1;
   rule();
   for (const t of doc.totals) row(t.label, t.value, t.strong);
@@ -362,82 +520,96 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
     if (s.footerLine) center(s.footerLine, wide ? 10 : 8);
   }
   if (cutFeedMm) y += cutFeedMm;
+    return y;
+  };
 
+  if (wide) {
+    // Sheets (A5/A4/Letter) are already a fixed physical page size.
+    const height = paper.heightMm!;
+    const pdf = new jsPDF({ unit: "mm", format: [width, height] });
+    renderBody(pdf, height);
+    return pdf;
+  }
+
+  // Roll paper: draw once on a generously tall scratch page purely to
+  // measure the real final y, then draw again on a page built to exactly
+  // that height. See the comment above renderBody for why this replaced an
+  // upfront size estimate.
+  const SCRATCH_HEIGHT_MM = 3000; // comfortably taller than any realistic bill
+  const scratchPdf = new jsPDF({ unit: "mm", format: [width, SCRATCH_HEIGHT_MM] });
+  const measuredY = renderBody(scratchPdf, SCRATCH_HEIGHT_MM);
+  // Small trailing buffer so the last rule/text's descenders aren't flush
+  // with the physical paper edge — independent of, and on top of, whatever
+  // cutFeedMm the user configured for their auto-cutter (already folded
+  // into measuredY above).
+  const BOTTOM_SAFETY_MM = 2;
+  const height = measuredY + BOTTOM_SAFETY_MM;
+  const pdf = new jsPDF({ unit: "mm", format: [width, height] });
+  renderBody(pdf, height);
   return pdf;
 }
 
 /**
  * Saves the receipt PDF. In the browser/PWA this is jsPDF's own Blob-download
- * `save()`. In the desktop shell it opens a native Save dialog and writes the
- * PDF bytes via `tauri-plugin-fs` instead — see backup.ts's `downloadBackup`
- * for the same pattern. Kept async so both branches share one call site;
+ * `save()`. In the desktop shell it writes straight into the app's shared
+ * `Invoices/` folder (see `saveToInvoicesFolder` in desktop.ts) and reveals
+ * the file in Explorer — no Save dialog, so every bill PDF lands in one
+ * predictable place instead of scattered across whatever folder the user
+ * last browsed to. Kept async so both branches share one call site;
  * existing unawaited callers (`downloadBillPdf`, print/share fallbacks below)
  * keep working unchanged.
  */
 export async function downloadReceipt(
   doc: ReceiptDoc,
   s: PrintSettings = readPrintSettings(),
+  section?: InvoiceSection,
 ): Promise<void> {
   const pdf = buildReceiptPdf(doc, s);
   if (isDesktop()) {
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
-    await saveFile(new Uint8Array(bytes), `${doc.fileName}.pdf`, "application/pdf", {
-      name: "PDF",
-      extensions: ["pdf"],
-    });
+    const abs = await saveToInvoicesFolder(new Uint8Array(bytes), `${doc.fileName}.pdf`, section);
+    await revealInFolder(abs);
+    toast.success("PDF saved", { description: `${doc.fileName}.pdf` });
     return;
   }
   pdf.save(`${doc.fileName}.pdf`);
+  toast.success("PDF downloaded", { description: `${doc.fileName}.pdf` });
 }
 
 /**
  * Opens the print dialog with the receipt, honouring the copies setting.
- *
- * Desktop (Windows/macOS/Linux, WebView2/WebKit): `contentWindow.print()` on
- * the hidden iframe below opens the same native OS print dialog it would in
- * any browser, listing whatever printer the OS has a driver for. STILL
- * NEEDS VERIFICATION ON REAL HARDWARE — see the "still open" section of the
- * port report; this file was not tested against a physical thermal printer.
- *
- * Mobile (Android/iOS): Android's system WebView does not implement
- * `window.print()` at all — calling it doesn't throw, it just does nothing,
- * which is why tapping Print looked like a dead button. There's also no
- * native "open in default app" for local files on mobile (`openPath` from
- * `tauri-plugin-opener` only handles URLs there). So on mobile we hand the
- * PDF to the OS share sheet instead (`navigator.share`) — the person picks
- * a PDF viewer or a print/share target from there, and most Android PDF
- * viewers (Drive, Adobe, etc.) have their own Print button that does go
- * through Android's native print framework. If the share sheet itself is
- * unavailable, we fall back to just saving the file so it's not a dead end.
+ * Unmodified for the desktop build: Tauri's Windows runtime is WebView2
+ * (full Chromium/Edge engine), so `contentWindow.print()` on the hidden
+ * iframe below opens the same native Windows print dialog it would in any
+ * browser — and that dialog lists whatever printer the OS has a driver for,
+ * which for most thermal/POS receipt printers on Windows is the normal way
+ * they're used (they register as a standard Windows print queue). This is
+ * the "no live backend needed" case from windows-app-build-prompt.md §1 —
+ * no plugin required. STILL NEEDS VERIFICATION ON REAL HARDWARE — see the
+ * "still open" section of the port report; this file was not tested against
+ * a physical thermal printer.
  */
-export async function printReceipt(doc: ReceiptDoc, s: PrintSettings = readPrintSettings()) {
-  const url = buildReceiptPdf(doc, s).output("bloburl") as unknown as string;
+export function printReceipt(
+  doc: ReceiptDoc,
+  s: PrintSettings = readPrintSettings(),
+  section?: InvoiceSection,
+) {
+  const pdf = buildReceiptPdf(doc, s);
+  const url = pdf.output("bloburl") as unknown as string;
+
+  // Desktop: also drop a copy in the same Invoices/ folder that Download
+  // and Excel exports use, so a printed bill is still on disk afterward —
+  // fire-and-forget, doesn't hold up the print dialog below.
+  if (isDesktop()) {
+    const bytes = pdf.output("arraybuffer") as ArrayBuffer;
+    void saveToInvoicesFolder(new Uint8Array(bytes), `${doc.fileName}.pdf`, section);
+  }
 
   // "Preview before print": open the PDF in a normal tab so the person can
   // check the layout and pick their printer from the browser's own dialog,
   // instead of jumping straight into a hidden-iframe silent print.
-  if (s.previewBeforePrint && !isMobileShell()) {
+  if (s.previewBeforePrint) {
     window.open(url, "_blank");
-    return;
-  }
-
-  if (isMobileShell()) {
-    const pdf = buildReceiptPdf(doc, s);
-    const blob = pdf.output("blob");
-    const file = new File([blob], `${doc.fileName}.pdf`, { type: "application/pdf" });
-    const nav = navigator as Navigator & {
-      canShare?: (data: ShareData) => boolean;
-      share?: (data: ShareData) => Promise<void>;
-    };
-    if (nav.canShare?.({ files: [file] }) && nav.share) {
-      try {
-        await nav.share({ files: [file], title: `${BUSINESS_NAME} ${doc.docNo}` });
-        return;
-      } catch {
-        // person cancelled the share sheet — fall through to saving instead
-      }
-    }
-    await downloadReceipt(doc, s);
     return;
   }
 
@@ -462,6 +634,7 @@ export async function shareReceipt(
   doc: ReceiptDoc,
   fallbackUrl: string,
   s: PrintSettings = readPrintSettings(),
+  section?: InvoiceSection,
 ) {
   const blob = buildReceiptPdf(doc, s).output("blob");
   const file = new File([blob], `${doc.fileName}.pdf`, { type: "application/pdf" });
@@ -469,20 +642,17 @@ export async function shareReceipt(
     canShare?: (data: ShareData) => boolean;
     share?: (data: ShareData) => Promise<void>;
   };
-  // Desktop (Windows/macOS/Linux, WebView2/WebKit): the Web Share API isn't
-  // implemented there at all, so `nav.canShare`/`nav.share` are undefined
-  // and the branch below would never run anyway. More importantly, the
-  // fallback's `window.open()` can't be relied on inside a Tauri webview:
-  // it either does nothing or tries to open a second webview window pointed
-  // at wa.me, which is not what "share on WhatsApp" should do on a desktop.
+  // Desktop (Tauri/WebView2): the Web Share API is not implemented in
+  // WebView2 at all, so `nav.canShare`/`nav.share` are undefined and the
+  // branch below would never run anyway. More importantly, the fallback's
+  // `window.open()` cannot be relied on inside a Tauri webview: it either
+  // does nothing or tries to open a second webview window pointed at
+  // wa.me, which is not what "share on WhatsApp" should do on a desktop.
   // So on desktop we skip the Web Share attempt entirely, save the PDF via
   // the native dialog, and hand the WhatsApp URL to the OS default browser
-  // through the opener plugin. Android/iOS are excluded from this branch —
-  // `isDesktop()` is true there too (same Tauri global), but their system
-  // WebView does support `navigator.share`, which is the normal way to
-  // hand a file to another app on mobile.
-  if (isDesktop() && !isMobileShell()) {
-    await downloadReceipt(doc, s);
+  // through the opener plugin.
+  if (isDesktop()) {
+    await downloadReceipt(doc, s, section);
     await openExternal(fallbackUrl);
     return "fallback";
   }
@@ -494,7 +664,7 @@ export async function shareReceipt(
       return "cancelled";
     }
   }
-  downloadReceipt(doc, s);
+  downloadReceipt(doc, s, section);
   await openExternal(fallbackUrl);
   return "fallback";
 }
@@ -502,9 +672,12 @@ export async function shareReceipt(
 /* ---------- document builders ---------- */
 
 export function billReceipt(bill: Bill): ReceiptDoc {
-  const app = readAppSettings();
-  const { taxAmount, lines: taxLines } = taxBreakdown(bill.total, app);
+  // Printed from the bill's own frozen tax snapshot, never recomputed at
+  // print time, so a reprint after a rate change is byte-identical to the
+  // copy the customer first received.
+  const taxLines = billTaxLines(bill);
   const grandTotal = billGrossTotal(bill);
+  const taxAmount = grandTotal - rupees(bill.total);
   const paid = billPaidAmount(bill);
   const due = Math.max(0, grandTotal - paid);
   return {
@@ -559,11 +732,27 @@ const durationText = (hours: number) => {
 };
 
 export function bookingReceipt(b: TurfBooking): ReceiptDoc {
-  const due = Math.max(0, b.total_amount - b.advance_paid);
   const courts = b.courts ?? 1;
   const snacks = b.snacks ?? [];
   const snacksTotal = b.snacks_total ?? 0;
   const turfAmount = b.turf_amount || b.hours * b.rate_per_hour * courts;
+  // GRAND TOTAL is derived from the same Turf + Snacks − Discount figure
+  // printed just above it, instead of trusting `b.total_amount` blindly.
+  // `total_amount` is normally created exactly this way (see TurfTab's
+  // submit handler), but `snacks_total` can in principle be non-zero on a
+  // row that predates that guarantee (an imported/restored booking, or a
+  // future feature that populates it) — trusting `total_amount` alone in
+  // that case would print a Grand Total that doesn't match the Turf/Snacks/
+  // Discount lines right above it, and a Balance Due computed off the wrong
+  // figure. Recomputing here keeps every printed number self-consistent.
+  const taxable = bookingTaxable(b);
+  // Tax applies wherever GST is switched on (Settings), not only on formal
+  // Bills — and it comes from the booking's own frozen snapshot, so a reprint
+  // after a rate change matches the customer's copy.
+  const taxLines = taxLinesWithFallback(taxable, b);
+  const grandTotal = bookingGrossTotal(b);
+  const taxAmount = grandTotal - taxable;
+  const due = Math.max(0, rupees(grandTotal - b.advance_paid));
   const timeText = b.start_time && b.end_time ? ` ${b.start_time}-${b.end_time}` : "";
   return {
     kind: "Booking",
@@ -594,7 +783,13 @@ export function bookingReceipt(b: TurfBooking): ReceiptDoc {
       { label: "Turf", value: pmoney(turfAmount) },
       ...(snacksTotal ? [{ label: "Snacks", value: pmoney(snacksTotal) }] : []),
       ...(b.discount ? [{ label: "Discount", value: "-" + pmoney(b.discount) }] : []),
-      { label: "GRAND TOTAL", value: pmoney(b.total_amount), strong: true },
+      ...(taxAmount > 0
+        ? [
+            { label: "Taxable Amount", value: pmoney(taxable) },
+            ...taxLines.map((l) => ({ label: l.label, value: pmoney(l.value) })),
+          ]
+        : []),
+      { label: "GRAND TOTAL", value: pmoney(grandTotal), strong: true },
       { label: "Paid", value: pmoney(b.advance_paid) },
       ...(due ? [{ label: "Balance due", value: pmoney(due) }] : []),
       { label: "Mode", value: b.payment_mode },
@@ -606,6 +801,9 @@ export function bookingReceipt(b: TurfBooking): ReceiptDoc {
 }
 
 export function snackSaleReceipt(s: SnackSale): ReceiptDoc {
+  const taxLines = taxLinesWithFallback(s.total, s);
+  const grandTotal = snackSaleGrossTotal(s);
+  const taxAmount = grandTotal - rupees(s.total);
   return {
     kind: "Bill",
     docNo: s.bill_no,
@@ -618,7 +816,13 @@ export function snackSaleReceipt(s: SnackSale): ReceiptDoc {
       amount: it.amount,
     })),
     totals: [
-      { label: "GRAND TOTAL", value: pmoney(s.total), strong: true },
+      ...(taxAmount > 0
+        ? [
+            { label: "Taxable Amount", value: pmoney(s.total) },
+            ...taxLines.map((l) => ({ label: l.label, value: pmoney(l.value) })),
+          ]
+        : []),
+      { label: "GRAND TOTAL", value: pmoney(grandTotal), strong: true },
       { label: "Mode", value: s.payment_mode },
       ...(s.booking_no ? [{ label: "Linked booking", value: s.booking_no }] : []),
     ],
@@ -650,7 +854,9 @@ export function receiptText(doc: ReceiptDoc) {
 /* ---------- backwards-compatible bill helpers ---------- */
 
 export const buildBillPdf = (bill: Bill) => buildReceiptPdf(billReceipt(bill));
-export const downloadBillPdf = (bill: Bill) => downloadReceipt(billReceipt(bill));
-export const printBillPdf = (bill: Bill) => printReceipt(billReceipt(bill));
-export const shareBillPdf = (bill: Bill, fallbackUrl: string) =>
-  shareReceipt(billReceipt(bill), fallbackUrl);
+export const downloadBillPdf = (bill: Bill, section?: InvoiceSection) =>
+  downloadReceipt(billReceipt(bill), readPrintSettings(), section);
+export const printBillPdf = (bill: Bill, section?: InvoiceSection) =>
+  printReceipt(billReceipt(bill), readPrintSettings(), section);
+export const shareBillPdf = (bill: Bill, fallbackUrl: string, section?: InvoiceSection) =>
+  shareReceipt(billReceipt(bill), fallbackUrl, readPrintSettings(), section);

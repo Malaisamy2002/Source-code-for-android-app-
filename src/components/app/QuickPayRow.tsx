@@ -1,19 +1,26 @@
 import { useState } from "react";
-import { Banknote, Copy, Smartphone, IndianRupee } from "lucide-react";
+import { Banknote, Smartphone, IndianRupee } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { balanceOf, billGrossTotal, money, type Bill } from "@/lib/biz";
-import { useCreateBill, useUpdateBill } from "@/lib/data";
+import { billGrossTotal, money, type Bill } from "@/lib/biz";
+import { useUpdateBill } from "@/lib/data";
+import { billDue } from "@/lib/dues";
+import { rupees } from "@/lib/money";
+import { useTabEntries } from "@/lib/tabs";
 
-/** One-tap payment shortcuts, partial payment entry and "bill again" for a single bill. */
+/** One-tap payment shortcuts and partial payment entry for a single bill. */
 export function QuickPayRow({ bill }: { bill: Bill }) {
   const updateBill = useUpdateBill();
-  const createBill = useCreateBill();
   const [part, setPart] = useState("");
   const [busy, setBusy] = useState(false);
-  const due = balanceOf(bill);
+  const { data: tabEntries = [] } = useTabEntries();
   const gross = billGrossTotal(bill);
+  // What this bill still owes ON ITS OWN: anything already pushed onto the
+  // customer's running tab (or a bill saved "On tab") belongs to the tab
+  // ledger, so collecting it here too would take the same rupee twice.
+  const due = billDue(bill, tabEntries);
+  const paidSoFar = rupees(bill.amount_paid);
 
   const payFull = async (mode: "Cash" | "UPI") => {
     if (busy) return;
@@ -22,7 +29,7 @@ export function QuickPayRow({ bill }: { bill: Bill }) {
       await updateBill.mutateAsync({
         id: bill.id,
         status: "paid",
-        amount_paid: gross,
+        amount_paid: Math.min(gross, paidSoFar + due),
         payment_mode: mode,
       });
       toast.success(`Paid via ${mode}`);
@@ -40,36 +47,15 @@ export function QuickPayRow({ bill }: { bill: Bill }) {
     }
     setBusy(true);
     try {
-      const paid = Math.min(gross, (Number(bill.amount_paid) || 0) + amt);
+      const applied = Math.min(amt, due);
+      const paid = Math.min(gross, paidSoFar + applied);
       await updateBill.mutateAsync({
         id: bill.id,
-        status: paid >= gross ? "paid" : "partial",
+        status: applied >= due ? "paid" : "partial",
         amount_paid: paid,
       });
       setPart("");
-      toast.success(`Recorded ${money(amt)} · Due ${money(Math.max(0, gross - paid))}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const billAgain = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await createBill.mutateAsync({
-        customer_name: bill.customer_name,
-        customer_phone: bill.customer_phone ?? "",
-        items: bill.items,
-        subtotal: bill.subtotal,
-        discount: bill.discount,
-        total: bill.total,
-        status: "unpaid",
-        amount_paid: 0,
-      });
-      toast.success("New bill created with the same items");
-    } catch (e) {
-      toast.error((e as Error).message);
+      toast.success(`Recorded ${money(applied)} · Due ${money(Math.max(0, due - applied))}`);
     } finally {
       setBusy(false);
     }
@@ -110,9 +96,6 @@ export function QuickPayRow({ bill }: { bill: Bill }) {
           </Button>
         </div>
       )}
-      <Button variant="outline" className="lift h-11 w-full" disabled={busy} onClick={billAgain}>
-        <Copy className="size-4" /> Bill again
-      </Button>
     </div>
   );
 }

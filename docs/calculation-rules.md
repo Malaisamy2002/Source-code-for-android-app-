@@ -86,6 +86,16 @@ timestamp to get a month key silently mis-buckets bills made in the last
 `dayKey()` in analytics.ts — never re-slice or re-parse a date string
 inline in a component or export.
 
+**Call sites already audited and fixed against this rule:** Excel export
+filenames, layout-preset export filenames, the print-test receipt date, and
+recurring-expense auto-posting. Recurring expenses in particular now store
+`spent_at` as a plain `YYYY-MM-DD` (matching every other expense row,
+instead of a UTC `toISOString()` that plain-date-equality filters never
+matched), post on the IST calendar day rather than the runtime's local day,
+and clamp a rule for "the 31st" to the last day of a shorter month instead
+of rolling into the next month. See `planRecurringPosts()` in
+`src/lib/expenses.ts` and its tests in `expenses.test.ts`.
+
 ---
 
 ## 2. THE double-counting rule: merged bookings
@@ -145,6 +155,42 @@ is NOT used even though the code touches `merged_into_bill_id`:
 
 ---
 
+## 2b. THE second double-counting rule: a balance moved to dues
+
+"Put balance on tab" (Turf tab) and billing a snack sale "On tab" hand a
+record's remaining balance to the customer's running tab. The booking write
+sets `advance_paid` to the **full gross total** while posting the remainder
+as a tab charge. So `advance_paid` is a settlement marker, not a cash figure:
+reading it as money counts the balance once on the booking and again as a tab
+payment when the customer settles on the Dues tab.
+
+**Never read `advance_paid` as collected money.** Use
+`bookingCashCollected(b, tabEntries)` from `src/lib/dues.ts`:
+
+```ts
+bookingCashCollected(b, entries) =
+  max(0, rupees(b.advance_paid) - netTabAmountFor(entries, "turf_booking", b.id));
+```
+
+Call sites that must route through it: `periodStats().collected` and
+`paymentSplit()` (analytics.ts), the Turf tab row, the Reports turf-dues
+list and its Excel "Advance paid" column, and the customer popup.
+
+**The one exception:** Reports' "Mark paid" writes `advance_paid = paid + due`
+back to the booking, so it uses the STORED figure. Using cash-taken there
+would erase the balance already parked on the tab.
+
+Related helpers (same file): `bookingMovedToDues` / `saleMovedToDues` drive
+the faded row and the "Moved to dues · D-…" tag; `isTabCashPayment` keeps
+merge/un-merge reversals (payment rows that carry a `ref_type`) out of
+collected cash.
+
+Cover: `dues.test.ts`, `analytics.test.ts` ("no double counting when a
+balance moves to dues"), `scripts/verify-math.ts` §12, and
+`docs/formula-report.md` §9.
+
+---
+
 ## 3. Cancelled bookings
 
 `status === "Cancelled"` bookings are excluded from every revenue, dues,
@@ -157,10 +203,14 @@ downstream functions already did.
 
 ---
 
-## 4. Tax — bills only
+## 4. Tax — bills, and wherever else GST is switched on
 
-Turf bookings and snack sales never carry tax. Only Bills go through
-`taxBreakdown(net, appSettings)`:
+Only Bills go through `taxBreakdown(net, appSettings)` directly. Turf
+bookings and snack sales carry their **own frozen tax snapshot**
+(`tax_amount`/`tax_lines`, set by `freezeTax()` in `ops.ts` at creation —
+see `biz.ts`'s `TaxSnapshot`) wherever GST is switched on: receipts, the
+Turf tab, the Dues tab (`bookingDue()`/`bookingGrossTotal()`) and merges
+all already treat that tax as real, collected money.
 
 ```
 net    = bill.total                          // pre-tax, as stored
@@ -169,15 +219,40 @@ paid   = status === "paid" ? gross : amount_paid
 dues  += max(0, gross - paid)
 ```
 
-- `revenue` (headline, gross) = `netRevenue + billsTax`
+- `revenue` (headline, gross) = `netRevenue + tax`
+- `tax` = `billsTax + bookingsTax + snacksTax` — each of the three is the
+  sum of that line's own frozen/recomputed tax, never assumed to be zero
+  for bookings/snacks.
 - `netRevenue` (no tax) = `billsRevenue + turfRevenue + snacksRevenue`
 - **Profit is always based on `netRevenue`, never `revenue`.** Tax is
   money passed through to the government, not earnings — including it in
   profit would overstate the business's actual take whenever tax is
   turned on.
 
-Never apply `taxBreakdown` to turf or snack totals — they're not taxable
-in this app's model.
+**Regression this section exists to prevent (fixed — see `analytics.test.ts`
+and `scripts/verify-math.ts` §11):** `periodStats()`'s bookings/sales loops
+used to assume turf/snacks never carry tax and left `bookingsRevenue`'s
+would-be tax out of `tax`/`revenue` entirely, even though the same
+booking's receipt, Turf tab balance and Dues tab figure were already
+tax-inclusive. That meant `collected` (tax-inclusive) could exceed
+`revenue` (tax excluded) by exactly the invisible GST, and `taxReport()` —
+the GST filing figures — only ever taxed `billsRevenue`, understating tax
+actually collected. Fixed by summing each booking's/sale's own
+`bookingGrossTotal(b) - rupees(b.total_amount)` /
+`snackSaleGrossTotal(s) - rupees(s.total)` into `tax`, and by having
+`taxReport()` use `netRevenue`/`s.tax` (all three lines) for
+`taxableValue`/`totalTax` instead of `billsRevenue` alone.
+
+**Known limitation, not yet fixed:** `taxReport()`'s per-rate `lines`
+breakdown (the CGST/SGST/custom-tax rows on the GST report) is still
+computed only from `taxBreakdown(billsRevenue, appSettings)` — it doesn't
+split booking/snack tax out by rate label the way `totalTax` now includes
+it in aggregate. Treat `lines` as bills-only detail and `totalTax`/
+`grossValue` as the whole-business figures for filing.
+
+Never apply `taxBreakdown` directly to turf or snack totals — always go
+through their own frozen-tax helpers (`bookingGrossTotal`,
+`snackSaleGrossTotal`, or `bookingDue`/`dues.ts` for what's still owed).
 
 ---
 
@@ -193,12 +268,14 @@ billsTax       = Σ taxBreakdown(bill.total).taxAmount
 billsCollected = Σ (status === "paid" ? gross : amount_paid)
 billsDues      = Σ max(0, gross - paid)
 
-turfRevenue    = Σ booking.total_amount        (unmerged, non-cancelled only)
-snacksRevenue  = Σ sale.total
+turfRevenue    = Σ booking.total_amount        (unmerged, non-cancelled only, pre-tax)
+snacksRevenue  = Σ sale.total                  (pre-tax)
+bookingsTax    = Σ max(0, bookingGrossTotal(booking) - booking.total_amount)  (unmerged, non-cancelled)
+snacksTax      = Σ max(0, snackSaleGrossTotal(sale) - sale.total)
 
 netRevenue     = billsRevenue + turfRevenue + snacksRevenue
-revenue        = netRevenue + billsTax
-tax            = billsTax
+tax            = billsTax + bookingsTax + snacksTax
+revenue        = netRevenue + tax
 
 collected      = billsCollected
                + Σ booking.advance_paid        (unmerged, non-cancelled)
@@ -208,7 +285,8 @@ expenses       = Σ expense.amount
 profit         = netRevenue - expenses          // NOT revenue - expenses
 
 dues           = billsDues
-               + Σ max(0, booking.total_amount - booking.advance_paid)  (unmerged, non-cancelled)
+               + Σ bookingDue(booking)          (unmerged, non-cancelled — tax-inclusive,
+                                                  from dues.ts; never re-derive by hand)
                // snack sales have no "dues" concept — always fully paid
 
 snackProfit    = Σ sale.profit
@@ -242,9 +320,14 @@ avgBookingValue      = Σ ALL matched booking.total_amount (merged included)
                         // so a merged booking doesn't silently read as ₹0 and
                         // drag the average down.
 
-outstandingTurfDues  = Σ max(0, total_amount - advance_paid) over UNMERGED
-                        matched bookings only (a merged booking is settled
-                        through its bill, so it can't still be "due" here)
+outstandingTurfDues  = Σ bookingDue(booking) over UNMERGED matched bookings
+                        only (a merged booking is settled through its bill,
+                        so it can't still be "due" here) — tax-inclusive,
+                        via dues.ts, the same figure the Turf tab, Dues tab
+                        and Dashboard show for the same booking. Do NOT
+                        re-derive as total_amount - advance_paid by hand:
+                        that silently drops tax on a taxed booking and will
+                        disagree with those other screens (see §8).
 
 firstActivity/lastActivity = min/max ISO date across all matched
                         bills/bookings/sales (no exclusions — even a
@@ -296,8 +379,9 @@ logic is non-trivial:
 3. **Is this a money total or an event count?** → money totals exclude
    merged bookings; event counts (bookings count, visit count, avg value)
    include them.
-4. **Does this touch tax?** → only Bills carry tax; profit uses
-   `netRevenue`, never `revenue`.
+4. **Does this touch tax?** → Bills, and turf bookings/snack sales
+   wherever GST is switched on, all carry tax (see §4) — never assume
+   bookings/snacks are tax-free. Profit uses `netRevenue`, never `revenue`.
 5. **Does this parse a date string directly?** → don't; route through
    `monthKey`/`dayKey` to avoid the UTC-slice bug on `bill_date`.
 6. **Is there already a shared function for this?** (`periodStats`,

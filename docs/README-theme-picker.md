@@ -58,23 +58,28 @@ import { ThemeCustomizerCard } from "@/components/app/ThemeCustomizerCard";
 
 ## How it works
 
-- Colors are stored as shadcn-style HSL strings (`"221 83% 53%"`, no `hsl()`
-  wrapper) in `localStorage` under the key `app-custom-theme` — same pattern
-  as your other local settings.
-- Picking a color sets `--primary` / `--background` (and derived
-  `--primary-foreground` / `--foreground` / `--ring`) directly on
-  `document.documentElement`, which every shadcn/Tailwind component already
-  reads from — so buttons, active nav states, badges, etc. update instantly
-  with no per-component changes needed.
-- `readableForeground()` computes WCAG relative luminance on whatever color
-  is picked and flips text to near-black or near-white automatically, so a
-  very light accent or background never produces unreadable text.
+- The picked colors (hex) are stored in `localStorage` under `app-custom-theme`
+  — one pair per mode (`primary`/`background` for light,
+  `primaryDark`/`backgroundDark` for dark), plus optional `secondary`/
+  `surface`/`highlight` slots per mode. Dark mode is tuned independently, not
+  a dimmed copy of light.
+- `themeToCssVars()` resolves a theme + mode into the design system's actual
+  `oklch(...)` custom properties (this codebase's CSS variables are oklch,
+  not HSL) — `contrastSafeAccent()` nudges the accent's lightness until it
+  clears a minimum contrast ratio against its own auto-picked foreground, and
+  the background is clamped into a sane lightness range per mode so a badly
+  chosen color can never make text unreadable.
+- `readableForeground()` picks near-black or near-white by an actual WCAG
+  contrast-ratio comparison (not a lightness threshold), so pale yellows and
+  mid greens don't end up with unreadable white text.
+- **Resolved-CSS cache:** `applyTheme()` computes CSS vars for *both* modes
+  in one call and caches them together under `app-custom-theme-css`.
+  Switching modes calls `applyCachedMode()` first, which replays the cached
+  values verbatim instead of re-running the color math — so light → dark →
+  light returns byte-identical values instead of drifting by a few
+  thousandths on each recompute. `THEME_INIT_SCRIPT` (injected before first
+  paint) reads the same cache key, with a fallback to the whole cached blob
+  for any theme saved before this dual-mode cache existed. Covered by
+  `theme.test.ts`.
 - Works identically in the web build and the Tauri desktop build — it's
   plain CSS variables + localStorage, nothing platform-specific.
-
-## Optional next step
-
-If you also want light/dark mode as a separate toggle (independent of the
-custom accent color), that's a bigger change — happy to build that too, but
-it typically means switching your CSS variable set based on a `.dark` class
-on `<html>`, which needs your current `index.css` to wire correctly.
