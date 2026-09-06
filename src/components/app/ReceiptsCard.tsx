@@ -22,7 +22,7 @@ import {
   pickReceiptsArchiveFile,
   type ImportReceiptsArchiveResult,
 } from "@/lib/receipts-share";
-import { isDesktop } from "@/lib/desktop";
+import { isAndroid, isDesktop } from "@/lib/desktop";
 
 export function ReceiptsCard() {
   const qc = useQueryClient();
@@ -110,7 +110,12 @@ export function ReceiptsCard() {
               variant="outline"
               disabled={busy !== null}
               onClick={() => {
-                if (isDesktop()) {
+                // Android satisfies isDesktop() too, but
+                // pickReceiptsArchiveFile()'s native open dialog (SAF picker)
+                // isn't implemented there — fall through to the
+                // <input type="file"> below instead, same as the browser/PWA
+                // build.
+                if (isDesktop() && !isAndroid()) {
                   void run("import", async () => {
                     const bytes = await pickReceiptsArchiveFile();
                     if (bytes === null) return; // user cancelled the open dialog

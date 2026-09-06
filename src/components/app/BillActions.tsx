@@ -51,6 +51,9 @@ export function BillActions({
             section,
           );
           if (res === "fallback") toast.info("PDF downloaded — attach it in WhatsApp");
+          // "cancelled" (Web Share dismissed, or an Android save failure —
+          // which already showed its own error toast) intentionally shows
+          // nothing further here.
         }}
       >
         <Share2 className="size-4" /> WhatsApp

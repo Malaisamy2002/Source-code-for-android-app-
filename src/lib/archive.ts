@@ -1,5 +1,5 @@
 import type { BackupFile } from "./backup";
-import { isDesktop } from "./desktop";
+import { isAndroid, isDesktop, saveExportFile } from "./desktop";
 import { db, resyncCounters } from "./localdb";
 import {
   githubPushFileAt,
@@ -111,8 +111,25 @@ export function githubArchivePath(cfg: GithubConfig, year: number) {
  * `downloadBackup`. Returns `false` if a desktop Save dialog was cancelled,
  * so `archiveYear` below can stop before deleting anything — the archive
  * must not be considered "downloaded" if the user backed out of the dialog.
+ *
+ * Android is matched before the generic desktop branch and skips that Save
+ * dialog entirely: on Android, `save()` hands back a `content://` URI that
+ * `writeTextFile()` cannot actually write to — it fails silently rather than
+ * throwing, so this used to return `true` (a real path, from the dialog)
+ * while leaving a 0-byte file on disk. That's the worst possible failure
+ * mode for this specific function: `archiveYear` deletes the local rows
+ * right after `downloadText` reports success, so a silent 0-byte write here
+ * meant permanently losing a year of bookings/sales with no usable backup of
+ * them anywhere. Routing Android through `saveExportFile` (the same
+ * MediaStore-backed plugin used for backups/exports) makes the write
+ * actually succeed-or-fail honestly, so that guarantee holds again.
  */
 async function downloadText(text: string, name: string): Promise<boolean> {
+  if (isAndroid()) {
+    const bytes = new TextEncoder().encode(text);
+    const result = await saveExportFile(bytes, name, "application/json");
+    return result.saved;
+  }
   if (isDesktop()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeTextFile } = await import("@tauri-apps/plugin-fs");
@@ -162,7 +179,7 @@ export async function archiveYear(year: number): Promise<ArchiveResult> {
   const saved = await downloadText(text, fileName);
   if (!saved)
     throw new Error(
-      `Archived to GitHub but the save dialog was cancelled — nothing was deleted. Re-run the archive to save a local copy too.`,
+      `Archived to GitHub but the local save didn't complete — nothing was deleted. Re-run the archive to save a local copy too.`,
     );
 
   await deleteYear(year);

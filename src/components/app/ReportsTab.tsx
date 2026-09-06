@@ -844,7 +844,10 @@ export function ReportsTab() {
 
   const exportPdf = () => {
     downloadReportPdf(buildStatementDoc()).then(
-      () => toast.success("Statement saved"),
+      (saved) => {
+        if (saved) toast.success("Statement saved");
+        else toast.error("Could not save PDF");
+      },
       (e) => toast.error(e instanceof Error ? e.message : "Could not save PDF"),
     );
   };

@@ -1,6 +1,13 @@
 import ExcelJS from "exceljs";
 import { toast } from "sonner";
-import { isDesktop, revealInFolder, saveToInvoicesFolder, type InvoiceSection } from "./desktop";
+import {
+  isAndroid,
+  isDesktop,
+  revealInFolder,
+  saveExportFile,
+  saveToInvoicesFolder,
+  type InvoiceSection,
+} from "./desktop";
 import { dayKey } from "./analytics";
 
 export type SheetRow = Record<string, string | number>;
@@ -100,6 +107,23 @@ export async function exportWorkbook(
     buffer = (await wb.xlsx.writeBuffer()) as ArrayBuffer;
   } catch {
     toast.error("Excel export failed");
+    return;
+  }
+
+  // Checked before the generic isDesktop() branch — Android satisfies
+  // isDesktop() too, but its $DOCUMENT fs-scope write isn't reliably visible
+  // to the user there. See saveExportFile's doc comment in desktop.ts.
+  if (isAndroid()) {
+    const result = await saveExportFile(
+      new Uint8Array(buffer),
+      name,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    if (result.saved) {
+      toast.success("Excel file saved to Downloads", { description: name });
+    } else {
+      toast.error("Couldn't save Excel file");
+    }
     return;
   }
 

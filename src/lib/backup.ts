@@ -1,5 +1,5 @@
 import { db, table, DATA_TABLES, type DataTable, type Row } from "./localdb";
-import { isDesktop } from "./desktop";
+import { isAndroid, isDesktop, saveExportFile } from "./desktop";
 
 export const BACKUP_TABLES = DATA_TABLES;
 
@@ -36,15 +36,34 @@ export function backupFileName() {
  * Save dialog via `tauri-plugin-dialog` + `tauri-plugin-fs`; returns the path
  * the user chose, or `null` if they cancelled the dialog.
  *
+ * Android is matched before the generic desktop branch and does NOT use that
+ * Save dialog: `tauri-plugin-dialog`'s `save()` hands back a `content://`
+ * URI on Android that `tauri-plugin-fs`'s `writeTextFile()` cannot write to
+ * — it does not throw, it just silently produces a 0-byte file (see
+ * `saveExportFile`'s doc comment in desktop.ts). That's a real correctness
+ * risk here specifically, since `archiveYear` in archive.ts (which shares
+ * this same dialog+fs pattern) deletes local rows once its own download
+ * reports success — a silently-empty backup would mean deleted data with no
+ * usable copy anywhere. Android instead writes through the bundled
+ * `android-save` plugin straight into the public Downloads folder, with no
+ * dialog and thus no "cancelled" outcome — just saved or not.
+ *
  * Kept async (the browser branch always did the work synchronously, so
  * existing unawaited call sites keep working unchanged) so BackupCard/
- * ArchiveCard can `await` it to know whether a desktop save was cancelled.
+ * ArchiveCard can `await` it to know whether a desktop save was cancelled
+ * (or an Android save failed).
  */
 export async function downloadBackup(
   backup: BackupFile,
   name = backupFileName(),
 ): Promise<string | null> {
   const text = JSON.stringify(backup, null, 2);
+
+  if (isAndroid()) {
+    const bytes = new TextEncoder().encode(text);
+    const result = await saveExportFile(bytes, name, "application/json");
+    return result.saved ? (result.path ?? name) : null;
+  }
 
   if (isDesktop()) {
     const { save } = await import("@tauri-apps/plugin-dialog");

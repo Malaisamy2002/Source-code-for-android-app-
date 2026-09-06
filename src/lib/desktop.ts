@@ -19,6 +19,28 @@ export function isDesktop(): boolean {
 }
 
 /**
+ * True inside the Android build of the Tauri shell specifically — a subset
+ * of `isDesktop()`. Tauri's `__TAURI_INTERNALS__` global is injected on
+ * Android too, but Android's scoped-storage rules mean several of the
+ * "desktop" code paths that key off `isDesktop()` alone don't work there:
+ * `saveToInvoicesFolder`'s `$DOCUMENT` fs-scope write, `tauri-plugin-dialog`'s
+ * `save()` handing back a `content://` URI that `tauri-plugin-fs` can't
+ * write to, and `tauri-plugin-opener`'s `openPath()` (Android only supports
+ * opening URLs there, not local paths). Every call site that forks on one of
+ * those needs `isDesktop() && !isAndroid()` for the "real desktop" branch and
+ * an `isAndroid()` branch routed through `saveExportFile` below instead.
+ *
+ * No `@tauri-apps/plugin-os` dependency is installed to ask the platform
+ * directly, so this reads the WebView's user-agent, which Android's system
+ * WebView always includes "Android" in.
+ */
+export function isAndroid(): boolean {
+  if (!isDesktop()) return false;
+  if (typeof navigator === "undefined") return false;
+  return /android/i.test(navigator.userAgent);
+}
+
+/**
  * Opens an external URL (e.g. a wa.me WhatsApp link) the right way for the
  * current shell.
  *
@@ -192,5 +214,69 @@ export async function revealInFolder(absPath: string): Promise<void> {
     await revealItemInDir(absPath);
   } catch {
     /* best-effort only */
+  }
+}
+
+/** Chunked byte→base64 encode. A plain `String.fromCharCode(...bytes)` blows
+ * the call-stack argument limit on large files (multi-page PDFs, receipts
+ * `.zip` archives); this stays well under it regardless of file size. */
+function bytesToBase64(bytes: Uint8Array): string {
+  const CHUNK = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+export type ExportSaveResult = { saved: boolean; path?: string };
+
+/**
+ * Saves an exported file (bill/report PDF, Excel workbook, backup/archive
+ * `.db` or `.zip`) into the device's public Downloads folder on Android, via
+ * the bundled `android-save` Tauri plugin (see
+ * `src-tauri/plugins/android-save`). This exists because, on Android, both
+ * of the desktop app's other save strategies fail:
+ *   - `saveToInvoicesFolder`'s direct write into the `$DOCUMENT` fs scope
+ *     (used by PDF/Excel exports) doesn't land anywhere the user can find —
+ *     Android's scoped-storage rules don't treat that scope as public.
+ *   - `tauri-plugin-dialog`'s `save()` + `tauri-plugin-fs`'s `writeFile()`
+ *     (used by backup/archive exports) hands back a `content://` URI that
+ *     `tauri-plugin-fs` cannot write to, silently producing a 0-byte file.
+ * The native plugin instead writes through `MediaStore` (API 29+) or a
+ * direct write to the public Downloads dir on older Android, which is the
+ * only route that reliably works — see that plugin's own doc comment for
+ * detail. On any failure (including the plugin being unavailable, which is
+ * how it behaves on non-Android targets) this resolves `{ saved: false }`
+ * rather than throwing, so callers can show a plain "couldn't save" message
+ * instead of the misleading download/print/share flows that used to run
+ * unconditionally under `isDesktop()`.
+ *
+ * There is no native picker involved (unlike the desktop Save-As dialog), so
+ * there's no "user cancelled" outcome here — only saved or not.
+ */
+export async function saveExportFile(
+  bytes: Uint8Array,
+  filename: string,
+  mimeType: string,
+  openAfterSave = false,
+): Promise<ExportSaveResult> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const result = await invoke<{ uri: string; bytesWritten: number }>(
+      "plugin:android-save|save_to_downloads",
+      {
+        payload: {
+          fileName: filename,
+          mimeType,
+          base64: bytesToBase64(bytes),
+          openAfterSave,
+        },
+      },
+    );
+    if (!result?.bytesWritten) return { saved: false };
+    return { saved: true, path: result.uri };
+  } catch {
+    return { saved: false };
   }
 }

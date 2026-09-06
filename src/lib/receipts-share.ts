@@ -1,6 +1,13 @@
 import JSZip from "jszip";
 import { db, nowIso, type ExpenseRow } from "./localdb";
-import { appDocumentExists, isDesktop, readAppDocument, saveToAppDocuments } from "./desktop";
+import {
+  appDocumentExists,
+  isAndroid,
+  isDesktop,
+  readAppDocument,
+  saveExportFile,
+  saveToAppDocuments,
+} from "./desktop";
 
 /**
  * Receipts sharing — a separate import/export path for just the receipt
@@ -147,12 +154,24 @@ export async function buildReceiptsArchive(): Promise<BuildReceiptsArchiveResult
  * `downloadBackup()` in `backup.ts`: native Save dialog on desktop, a
  * Blob-URL `<a download>` on web. Returns the path chosen (desktop), a
  * fixed placeholder (web, which has no path to report), or `null` if the
- * user cancelled the desktop Save dialog.
+ * user cancelled the desktop Save dialog (or, on Android, if the save
+ * failed).
+ *
+ * Android is matched before the generic desktop branch for the same reason
+ * as `downloadBackup`/`downloadText`: the Save dialog's `content://` result
+ * can't actually be written to by `tauri-plugin-fs` there, so it's routed
+ * through the `android-save` plugin instead.
  */
 export async function downloadReceiptsArchive(
   blob: Blob,
   name = receiptsArchiveFileName(),
 ): Promise<string | null> {
+  if (isAndroid()) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const result = await saveExportFile(bytes, name, "application/zip");
+    return result.saved ? (result.path ?? name) : null;
+  }
+
   if (isDesktop()) {
     const { save } = await import("@tauri-apps/plugin-dialog");
     const { writeFile } = await import("@tauri-apps/plugin-fs");

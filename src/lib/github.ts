@@ -1,5 +1,5 @@
 import type { BackupFile } from "./backup";
-import { isDesktop } from "./desktop";
+import { isAndroid, isDesktop } from "./desktop";
 
 export type GithubConfig = {
   owner: string;
@@ -19,13 +19,17 @@ export const DEFAULT_GITHUB_CONFIG: GithubConfig = {
 
 // Non-secret fields only — safe in localStorage on both builds.
 const META_KEY = "ks:github-backup";
-// Same key used as a fallback token store in the browser/PWA build, where
-// there is no OS credential store to move it into (documented risk, same
-// as before this port — see windows-app-build-prompt.md §0.4). On desktop
-// this key is never written to; the token lives in the OS credential store
-// instead (Windows Credential Manager, via the `keyring` Rust crate, exposed
-// through the `keyring_get_token` / `keyring_set_token` / `keyring_delete_token`
-// Tauri commands registered in src-tauri/src/lib.rs).
+// Fallback token store used in the browser/PWA build, where there is no OS
+// credential store to move it into (documented risk, same as before this
+// port — see windows-app-build-prompt.md §0.4), AND on Android, which has
+// no equivalent of the `keyring` crate's OS credential store support
+// (Windows Credential Manager / macOS Keychain / libsecret — all
+// desktop-only backends; see `src-tauri/src/lib.rs`'s `#[cfg(not(target_os
+// = "android"))]`-gated keyring commands). On real desktop this key is
+// never written to; the token lives in the OS credential store instead,
+// exposed through the `keyring_get_token` / `keyring_set_token` /
+// `keyring_delete_token` Tauri commands registered in
+// `src-tauri/src/lib.rs`.
 const WEB_TOKEN_KEY = "ks:github-backup-token";
 const KEYRING_SERVICE = "turf-snack-ledger";
 const KEYRING_ACCOUNT = "github-backup-token";
@@ -53,7 +57,12 @@ function writeMeta(meta: Meta) {
 }
 
 async function readToken(): Promise<string> {
-  if (isDesktop()) {
+  // Android is excluded here even though it satisfies isDesktop(): the
+  // keyring_* commands below only exist on real desktop targets (see the
+  // #[cfg(not(target_os = "android"))] gate in src-tauri/src/lib.rs), so
+  // invoking them on Android would just reject every time. Route Android
+  // through the same localStorage fallback the browser build uses instead.
+  if (isDesktop() && !isAndroid()) {
     const { invoke } = await import("@tauri-apps/api/core");
     try {
       return (
@@ -75,19 +84,29 @@ async function readToken(): Promise<string> {
 }
 
 async function writeToken(token: string): Promise<void> {
-  if (isDesktop()) {
+  if (isDesktop() && !isAndroid()) {
     const { invoke } = await import("@tauri-apps/api/core");
-    if (token) {
-      await invoke("keyring_set_token", {
-        service: KEYRING_SERVICE,
-        account: KEYRING_ACCOUNT,
-        token,
-      });
-    } else {
-      await invoke("keyring_delete_token", {
-        service: KEYRING_SERVICE,
-        account: KEYRING_ACCOUNT,
-      }).catch(() => undefined); // fine if there was nothing to delete
+    try {
+      if (token) {
+        await invoke("keyring_set_token", {
+          service: KEYRING_SERVICE,
+          account: KEYRING_ACCOUNT,
+          token,
+        });
+      } else {
+        await invoke("keyring_delete_token", {
+          service: KEYRING_SERVICE,
+          account: KEYRING_ACCOUNT,
+        }).catch(() => undefined); // fine if there was nothing to delete
+      }
+    } catch {
+      // OS credential store refused the write (locked, unavailable, etc.) —
+      // fall back to localStorage below rather than leaving "Save GitHub
+      // settings" throwing with no way to recover, which is what happened
+      // here before this store had any error handling at all.
+      if (typeof window === "undefined") return;
+      if (token) window.localStorage.setItem(WEB_TOKEN_KEY, token);
+      else window.localStorage.removeItem(WEB_TOKEN_KEY);
     }
     return;
   }

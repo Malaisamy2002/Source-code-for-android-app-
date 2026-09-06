@@ -27,7 +27,7 @@ import {
   restoreBackup,
   type BackupFile,
 } from "@/lib/backup";
-import { isDesktop } from "@/lib/desktop";
+import { isAndroid, isDesktop } from "@/lib/desktop";
 import {
   DEFAULT_GITHUB_CONFIG,
   githubPull,
@@ -146,7 +146,11 @@ export function BackupCard() {
               variant="outline"
               disabled={busy !== null}
               onClick={() => {
-                if (isDesktop()) {
+                // Android satisfies isDesktop() too, but pickBackupFile()'s
+                // native open dialog (SAF picker) isn't implemented there —
+                // fall through to the <input type="file"> below instead,
+                // same as the browser/PWA build.
+                if (isDesktop() && !isAndroid()) {
                   void run("import", async () => {
                     const text = await pickBackupFile();
                     if (text === null) return; // user cancelled the open dialog
@@ -264,7 +268,12 @@ export function BackupCard() {
                       await writeGithubConfig(cfg);
                       setEditing(false);
                       toast.success(
-                        isDesktop()
+                        // Android satisfies isDesktop() too, but there's no
+                        // Android keyring implementation yet — the token
+                        // falls back to localStorage there, same as the
+                        // browser build, so it shouldn't claim the OS
+                        // credential store was used.
+                        isDesktop() && !isAndroid()
                           ? "GitHub details saved — token stored in Windows Credential Manager"
                           : "GitHub details saved on this device",
                       );

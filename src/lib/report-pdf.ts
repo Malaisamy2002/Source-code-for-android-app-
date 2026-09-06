@@ -1,8 +1,10 @@
 import { jsPDF } from "jspdf";
 import {
+  isAndroid,
   isDesktop,
   openExternal,
   revealInFolder,
+  saveExportFile,
   saveToInvoicesFolder,
   INVOICE_SECTIONS,
   type InvoiceSection,
@@ -169,24 +171,43 @@ export function buildReportPdf(doc: ReportPdfDoc, s: PrintSettings = readPrintSe
 
 /** Saves the report PDF — desktop writes straight into the shared
  * `Invoices/` folder (no Save dialog), same as `downloadReceipt` in
- * receipt.ts; browser/PWA keeps jsPDF's own Blob download. */
+ * receipt.ts; browser/PWA keeps jsPDF's own Blob download. Android is
+ * matched before the generic desktop branch and routed through
+ * `saveExportFile` instead — see `downloadReceipt` in receipt.ts for why.
+ * Returns `false` only when the Android save genuinely failed, so callers
+ * (ArchiveCard's verification PDF, ReportsTab's exportPdf) can skip a
+ * false-positive "saved" toast. */
 export async function downloadReportPdf(
   doc: ReportPdfDoc,
   s: PrintSettings = readPrintSettings(),
   section: InvoiceSection | (string & {}) = INVOICE_SECTIONS.reports,
-): Promise<void> {
+): Promise<boolean> {
   const pdf = buildReportPdf(doc, s);
+  if (isAndroid()) {
+    const bytes = pdf.output("arraybuffer") as ArrayBuffer;
+    const result = await saveExportFile(
+      new Uint8Array(bytes),
+      `${doc.fileName}.pdf`,
+      "application/pdf",
+    );
+    return result.saved;
+  }
   if (isDesktop()) {
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
     const abs = await saveToInvoicesFolder(new Uint8Array(bytes), `${doc.fileName}.pdf`, section);
     await revealInFolder(abs);
-    return;
+    return true;
   }
   pdf.save(`${doc.fileName}.pdf`);
+  return true;
 }
 
 /** Shares the report PDF via WhatsApp where possible, falling back to a
- * plain download — mirrors `shareReceipt`'s desktop/mobile/browser split. */
+ * plain download — mirrors `shareReceipt`'s desktop/mobile/browser split.
+ * Android is excluded from the desktop-only early-return branch (it also
+ * satisfies `isDesktop()`, but its WebView supports the Web Share API with
+ * file attachments, so it should get a real "shared"/"cancelled" attempt
+ * instead of always reporting "fallback" the way it used to). */
 export async function shareReportPdf(
   doc: ReportPdfDoc,
   fallbackUrl: string,
@@ -194,7 +215,7 @@ export async function shareReportPdf(
   section: InvoiceSection | (string & {}) = INVOICE_SECTIONS.reports,
 ): Promise<"shared" | "fallback" | "cancelled"> {
   const pdf = buildReportPdf(doc, s);
-  if (isDesktop()) {
+  if (isDesktop() && !isAndroid()) {
     await downloadReportPdf(doc, s, section);
     await openExternal(fallbackUrl);
     return "fallback";
@@ -212,6 +233,12 @@ export async function shareReportPdf(
     } catch {
       return "cancelled";
     }
+  }
+  if (isAndroid()) {
+    const saved = await downloadReportPdf(doc, s, section);
+    if (!saved) return "cancelled";
+    await openExternal(fallbackUrl);
+    return "fallback";
   }
   await downloadReportPdf(doc, s, section);
   await openExternal(fallbackUrl);

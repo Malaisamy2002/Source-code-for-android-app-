@@ -14,9 +14,11 @@ import {
   type Bill,
 } from "./biz";
 import {
+  isAndroid,
   isDesktop,
   openExternal,
   revealInFolder,
+  saveExportFile,
   saveToInvoicesFolder,
   type InvoiceSection,
 } from "./desktop";
@@ -558,22 +560,46 @@ export function buildReceiptPdf(doc: ReceiptDoc, s: PrintSettings = readPrintSet
  * last browsed to. Kept async so both branches share one call site;
  * existing unawaited callers (`downloadBillPdf`, print/share fallbacks below)
  * keep working unchanged.
+ *
+ * Returns `false` when the save genuinely failed (currently only reachable
+ * on Android, via `saveExportFile`) so callers can skip a false-positive
+ * "saved"/"shared" message instead of always assuming success.
  */
 export async function downloadReceipt(
   doc: ReceiptDoc,
   s: PrintSettings = readPrintSettings(),
   section?: InvoiceSection,
-): Promise<void> {
+): Promise<boolean> {
   const pdf = buildReceiptPdf(doc, s);
+
+  // Checked before the generic isDesktop() branch: Android satisfies
+  // isDesktop() too, but the $DOCUMENT fs-scope write below isn't reliably
+  // visible to the user there (see saveExportFile's doc comment).
+  if (isAndroid()) {
+    const bytes = pdf.output("arraybuffer") as ArrayBuffer;
+    const result = await saveExportFile(
+      new Uint8Array(bytes),
+      `${doc.fileName}.pdf`,
+      "application/pdf",
+    );
+    if (result.saved) {
+      toast.success("PDF saved to Downloads", { description: `${doc.fileName}.pdf` });
+    } else {
+      toast.error("Couldn't save PDF");
+    }
+    return result.saved;
+  }
+
   if (isDesktop()) {
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
     const abs = await saveToInvoicesFolder(new Uint8Array(bytes), `${doc.fileName}.pdf`, section);
     await revealInFolder(abs);
     toast.success("PDF saved", { description: `${doc.fileName}.pdf` });
-    return;
+    return true;
   }
   pdf.save(`${doc.fileName}.pdf`);
   toast.success("PDF downloaded", { description: `${doc.fileName}.pdf` });
+  return true;
 }
 
 /**
@@ -599,8 +625,12 @@ export function printReceipt(
 
   // Desktop: also drop a copy in the same Invoices/ folder that Download
   // and Excel exports use, so a printed bill is still on disk afterward —
-  // fire-and-forget, doesn't hold up the print dialog below.
-  if (isDesktop()) {
+  // fire-and-forget, doesn't hold up the print dialog below. Skipped on
+  // Android: that $DOCUMENT fs-scope write isn't reliable there (same
+  // reasoning as downloadReceipt above), and printing shouldn't silently
+  // attempt — and fail — a save the person didn't ask for. Sharing/
+  // downloading the receipt already covers "get a copy on Android".
+  if (isDesktop() && !isAndroid()) {
     const bytes = pdf.output("arraybuffer") as ArrayBuffer;
     void saveToInvoicesFolder(new Uint8Array(bytes), `${doc.fileName}.pdf`, section);
   }
@@ -642,16 +672,24 @@ export async function shareReceipt(
     canShare?: (data: ShareData) => boolean;
     share?: (data: ShareData) => Promise<void>;
   };
-  // Desktop (Tauri/WebView2): the Web Share API is not implemented in
-  // WebView2 at all, so `nav.canShare`/`nav.share` are undefined and the
-  // branch below would never run anyway. More importantly, the fallback's
-  // `window.open()` cannot be relied on inside a Tauri webview: it either
-  // does nothing or tries to open a second webview window pointed at
-  // wa.me, which is not what "share on WhatsApp" should do on a desktop.
-  // So on desktop we skip the Web Share attempt entirely, save the PDF via
-  // the native dialog, and hand the WhatsApp URL to the OS default browser
-  // through the opener plugin.
-  if (isDesktop()) {
+  // Desktop (Tauri/WebView2, excluding Android — see below): the Web Share
+  // API is not implemented in WebView2 at all, so `nav.canShare`/`nav.share`
+  // are undefined and the branch below would never run anyway. More
+  // importantly, the fallback's `window.open()` cannot be relied on inside a
+  // Tauri webview: it either does nothing or tries to open a second webview
+  // window pointed at wa.me, which is not what "share on WhatsApp" should do
+  // on a desktop. So on real desktop we skip the Web Share attempt entirely,
+  // save the PDF via the native dialog, and hand the WhatsApp URL to the OS
+  // default browser through the opener plugin.
+  //
+  // Android is deliberately excluded from this branch even though it also
+  // satisfies isDesktop(): Android's system WebView does implement the Web
+  // Share API (including file attachments) via the OS share sheet, so it
+  // should get the same "shared"/"cancelled" attempt as the browser build
+  // below rather than being routed into a desktop-only save+openExternal
+  // flow that used to unconditionally report "fallback" even when nothing
+  // was actually attached.
+  if (isDesktop() && !isAndroid()) {
     await downloadReceipt(doc, s, section);
     await openExternal(fallbackUrl);
     return "fallback";
@@ -663,6 +701,15 @@ export async function shareReceipt(
     } catch {
       return "cancelled";
     }
+  }
+  // Android without Web Share support (or the user's default share sheet
+  // has nothing that accepts the file): save to Downloads first so there's
+  // something to attach, and don't open WhatsApp if that save failed.
+  if (isAndroid()) {
+    const saved = await downloadReceipt(doc, s, section);
+    if (!saved) return "cancelled";
+    await openExternal(fallbackUrl);
+    return "fallback";
   }
   downloadReceipt(doc, s, section);
   await openExternal(fallbackUrl);

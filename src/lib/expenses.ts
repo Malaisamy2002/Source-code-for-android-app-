@@ -13,7 +13,15 @@ import {
 import { db, newId, nextExpenseNo, nowIso, sortBy } from "./localdb";
 import { readCache, writeCache } from "./data";
 import { monthKey as monthKeyCore, dayKey } from "./analytics";
-import { appDocumentAbsPath, appDocumentExists, isDesktop, saveToAppDocuments } from "./desktop";
+import {
+  appDocumentAbsPath,
+  appDocumentExists,
+  isAndroid,
+  isDesktop,
+  readAppDocument,
+  saveExportFile,
+  saveToAppDocuments,
+} from "./desktop";
 
 /** Icon shown next to each expense category. */
 export const CATEGORY_ICONS: Record<string, LucideIcon> = {
@@ -276,14 +284,38 @@ export async function uploadReceipt(file: File, date: string = dayKey(new Date()
 /**
  * Opens a stored receipt for viewing.
  *
- * Desktop: hands the absolute file path to the OS's default photo viewer
- * (via `tauri-plugin-opener`) — no browser tab/popup involved, so it can't
- * get silently blocked the way `window.open` can.
+ * Desktop (excluding Android): hands the absolute file path to the OS's
+ * default photo viewer (via `tauri-plugin-opener`) — no browser tab/popup
+ * involved, so it can't get silently blocked the way `window.open` can.
+ *
+ * Android: `tauri-plugin-opener`'s `openPath()` only supports opening URLs
+ * on Android, not local file paths — calling it with a path there throws
+ * every time (confirmed against Tauri's own platform-support docs), so
+ * "View receipt" would otherwise error out unconditionally. The receipt
+ * photo also lives in the app's private storage (see `uploadReceipt`
+ * above), which isn't something `ACTION_VIEW` can open directly without a
+ * content provider anyway. Both problems are solved the same way exports
+ * solve theirs: read the private bytes back out and hand them to the
+ * `android-save` plugin with `openAfterSave`, which writes a copy into the
+ * public Downloads folder via MediaStore and immediately opens it through
+ * the OS viewer via a `content://` URI it already knows how to grant.
  *
  * Web: returns a blob Object URL for the caller to `window.open`/render;
  * revoke it when done.
  */
 export async function openReceipt(path: string): Promise<string | null> {
+  if (isAndroid()) {
+    const found = await appDocumentExists(path);
+    if (!found) throw new Error("Receipt not found on this device");
+    const bytes = await readAppDocument(path);
+    const ext = path.split(".").pop()?.toLowerCase() || "jpg";
+    const mimeType = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg";
+    const fileName = path.split("/").pop() || `receipt.${ext}`;
+    const result = await saveExportFile(bytes, fileName, mimeType, true);
+    if (!result.saved) throw new Error("Could not open this receipt");
+    return null; // opened natively — nothing for the caller to display
+  }
+
   if (isDesktop()) {
     const found = await appDocumentExists(path);
     if (!found) throw new Error("Receipt not found on this device");

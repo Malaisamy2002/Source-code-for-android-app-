@@ -135,7 +135,11 @@ export function ArchiveCard() {
         });
         return;
       }
-      await downloadReportPdf(verificationPdfDoc(result));
+      const saved = await downloadReportPdf(verificationPdfDoc(result));
+      if (!saved) {
+        toast.error("Could not save the verification PDF");
+        return;
+      }
       const passed = result.rows.filter((r) => r.pass).length;
       if (result.allPassed) {
         toast.success(`All ${result.rows.length} checks passed`, {
