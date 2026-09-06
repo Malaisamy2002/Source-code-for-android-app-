@@ -27,3 +27,14 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# The Android CI workflow builds `--debug` (no release keystore configured
+# yet — see build-android.yml), which uses this `dev` profile, not the one
+# above. Without an override here, `dev` keeps full DWARF debug symbols in
+# the compiled .so — that's what was making even a single-ABI debug APK
+# 100-200MB. `strip = "debuginfo"` drops those symbols while leaving the
+# build otherwise unoptimized and still debuggable at the Android/JS layer
+# (this only affects native Rust backtraces, which the app doesn't rely on
+# for debugging — most issues surface in the webview/JS side anyway).
+[profile.dev]
+strip = "debuginfo"

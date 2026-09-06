@@ -22,11 +22,13 @@ import {
   Receipt,
   TicketPercent,
   Wallet,
+  Wallet2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Accordion } from "@/components/ui/accordion";
 import { formatDMY, money, whatsappUrl } from "@/lib/biz";
 import { exportToExcel, exportWorkbook } from "@/lib/xlsx";
 import { INVOICE_SECTIONS } from "@/lib/desktop";
@@ -74,8 +76,10 @@ import { TopCustomersCard } from "./TopCustomersCard";
 import { TurfUsageDetailCard } from "./TurfUsageDetailCard";
 import { ItemPerformanceCard } from "./ItemPerformanceCard";
 import { SectionHeading } from "./SectionHeading";
+import { SettingsSection } from "./SettingsSection";
 import { SortMenu } from "./SortMenu";
 import { LayoutSection, LayoutSections, LayoutPart, LayoutParts } from "./LayoutSection";
+import { usePersistedState } from "@/lib/ui-prefs";
 
 const PIE_COLORS = [
   "var(--chart-1)",
@@ -233,6 +237,13 @@ export function ReportsTab() {
     "reports-turf-dues",
     TURF_DUES_SORT_OPTIONS,
     { field: "due", dir: "desc" },
+  );
+  // Long per-booking due list — collapsible like a Settings dropdown instead
+  // of always taking up the full page. Open by default so nothing changes
+  // for anyone who hasn't touched it yet.
+  const [duesSectionOpen, setDuesSectionOpen] = usePersistedState<string[]>(
+    "reports-open-sections",
+    ["turf-dues"],
   );
   const sortedDues = useMemo(
     () =>
@@ -1291,11 +1302,15 @@ export function ReportsTab() {
 
       <LayoutSection id="reports.turf-dues">
       <LayoutParts sectionId="reports.turf-dues">
-      <Card className="frost">
+      <Accordion type="multiple" value={duesSectionOpen} onValueChange={setDuesSectionOpen}>
+      <SettingsSection
+        value="turf-dues"
+        eyebrow="OUTSTANDING"
+        title="Turf dues"
+        icon={Wallet2}
+        action={
         <LayoutPart id="reports.turf-dues.toolbar">
-        <CardHeader className="flex-row flex-wrap items-center justify-between gap-2 space-y-0 pb-2">
-          <CardTitle className="page-title text-base">Turf dues</CardTitle>
-          {dues.length > 0 && (
+          {dues.length > 0 ? (
             <SortMenu
               options={TURF_DUES_SORT_OPTIONS}
               field={turfDuesSort.field}
@@ -1303,11 +1318,12 @@ export function ReportsTab() {
               onFieldChange={turfDuesSort.setField}
               onToggleDir={turfDuesSort.toggleDir}
             />
-          )}
-        </CardHeader>
+          ) : null}
         </LayoutPart>
+        }
+      >
         <LayoutPart id="reports.turf-dues.list">
-        <CardContent className="space-y-2">
+        <div className="space-y-2">
           {dues.length === 0 ? (
             <p className="text-sm text-muted-foreground">No pending dues.</p>
           ) : (
@@ -1351,9 +1367,10 @@ export function ReportsTab() {
               </div>
             ))
           )}
-        </CardContent>
+        </div>
         </LayoutPart>
-      </Card>
+      </SettingsSection>
+      </Accordion>
       </LayoutParts>
       </LayoutSection>
       </LayoutSections>

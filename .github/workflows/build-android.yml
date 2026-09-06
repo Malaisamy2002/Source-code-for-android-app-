@@ -11,12 +11,13 @@ name: Build Android app
 # nothing to gain from committing it, and it avoids the generated project
 # drifting out of sync with a manually-edited copy).
 #
-# Produces a DEBUG APK only right now (self-signed with Android's default
+# Produces DEBUG APKs only right now (self-signed with Android's default
 # debug key, installable on a device/emulator for testing, NOT suitable for
-# the Play Store). See the commented-out RELEASE SIGNING block at the bottom
-# for what's needed to produce a signed release .aab — that part needs a
-# real keystore + `gen/android` to actually exist first so its signing
-# config can be wired up; it's stubbed here, not implemented.
+# the Play Store), split per ABI so no single file bundles all four
+# architectures' native libraries. See the commented-out RELEASE SIGNING
+# block at the bottom for what's needed to produce a signed release .aab —
+# that part needs a real keystore + `gen/android` to actually exist first so
+# its signing config can be wired up; it's stubbed here, not implemented.
 on:
   workflow_dispatch:
   push:
@@ -112,13 +113,72 @@ jobs:
           key: gradle-${{ runner.os }}-${{ hashFiles('src-tauri/gen/android/**/*.gradle*') }}
           restore-keys: gradle-${{ runner.os }}-
 
-      - name: Build the Android app (debug APK)
-        run: bunx tauri android build --apk --debug
+      # `--split-per-abi` avoids a single "universal" APK that bundles native
+      # libraries for all four architectures (aarch64, armv7, i686, x86_64)
+      # into one file — that's what was ballooning the debug APK to ~490MB.
+      # With this flag Gradle instead produces one smaller APK per ABI under
+      # app/build/outputs/apk/<abi>/debug/.
+      - name: Build the Android app (debug APKs, split per ABI)
+        run: bunx tauri android build --apk --debug --split-per-abi
 
-      - name: Upload APK artifact
+      # Logged so a real run's output confirms the exact per-ABI file names
+      # this Tauri/Gradle version produces — the globs below are pattern
+      # matches (via if-no-files-found: warn, not error) rather than a
+      # guaranteed-exact filename, precisely so this log is the place to
+      # double check them if a pattern below ever needs adjusting.
+      - name: List built APKs
+        run: find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
+
+      # Uploaded as four separate artifacts (instead of one zip bundling all
+      # of them) so installing on a real device only means downloading the
+      # one file that matches it — most modern phones want arm64-v8a.
+      - name: Upload arm64-v8a APK (most phones)
         uses: actions/upload-artifact@v4
         with:
-          name: turf-ledger-android-debug
+          name: turf-ledger-arm64-v8a-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*arm64*.apk
+          if-no-files-found: warn
+
+      - name: Upload armeabi-v7a APK (older 32-bit phones)
+        uses: actions/upload-artifact@v4
+        with:
+          name: turf-ledger-armeabi-v7a-debug
+          # Tauri's Android build (via cargo-mobile2) names the armv7 flavor
+          # "arm", not the literal ABI string "armeabi-v7a" — confirmed from
+          # a real build's Gradle variant name ("armDebug") reported at
+          # https://github.com/tauri-apps/cargo-mobile2/issues/290. The
+          # app-arm-*.apk pattern is the one expected to actually match;
+          # *armeabi*.apk is kept only in case a future Tauri version
+          # renames the flavor to match the real ABI string.
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/app-arm-*.apk
+            src-tauri/gen/android/app/build/outputs/apk/**/*armeabi*.apk
+          if-no-files-found: warn
+
+      - name: Upload x86_64 APK (64-bit emulators)
+        uses: actions/upload-artifact@v4
+        with:
+          name: turf-ledger-x86_64-debug
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*x86_64*.apk
+          if-no-files-found: warn
+
+      - name: Upload x86 APK (32-bit emulators)
+        uses: actions/upload-artifact@v4
+        with:
+          name: turf-ledger-x86-debug
+          path: |
+            src-tauri/gen/android/app/build/outputs/apk/**/*x86*.apk
+            !src-tauri/gen/android/app/build/outputs/apk/**/*x86_64*.apk
+          if-no-files-found: warn
+
+      # Safety net: every APK the build produced, in one place. Kept as
+      # if-no-files-found: error so the job still fails loudly if the build
+      # produced nothing at all, even if one of the four specific patterns
+      # above happened to miss a real file due to a naming difference.
+      - name: Upload all APKs (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: turf-ledger-android-debug-all
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
